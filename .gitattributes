@@ -1,0 +1,5 @@
+native/vieneu_core/assets/sea-g2p/sea_g2p.bin filter=lfs diff=lfs merge=lfs -text
+tools/sea-g2p-native/python/sea_g2p/sea_g2p.bin filter=lfs diff=lfs merge=lfs -text
+assets/vieneu/model/vieneu_backbone_shared.data filter=lfs diff=lfs merge=lfs -text
+assets/vieneu/model/vieneu_heads.json filter=lfs diff=lfs merge=lfs -text
+assets/sea-g2p/sea_g2p.bin filter=lfs diff=lfs merge=lfs -text
