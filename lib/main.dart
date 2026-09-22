@@ -1,3 +1,8 @@
+import 'dart:math' as math;
+import 'dart:async';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 import 'dart:typed_data';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -63,6 +68,8 @@ class _HomePageState extends State<HomePage> {
 
   final SharedPreferencesAsync _preferences = SharedPreferencesAsync();
 
+  final AudioPlayer _audioPlayer = AudioPlayer();
+
   List<VietnameseVoice> _voices = const [];
 
   VietnameseVoice? _selectedVoice;
@@ -80,8 +87,8 @@ class _HomePageState extends State<HomePage> {
   double _paddingSeconds = 0.5;
   bool _pauseUsesAudioLength = false;
 
-  Process? _playbackProcess;
   bool _stopPlaybackRequested = false;
+  Completer<void>? _stopPlaybackCompleter;
 
   @override
   void initState() {
@@ -92,32 +99,94 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  Future<String> _prepareAndroidAssets() async {
+    final applicationSupportDirectory =
+        await getApplicationSupportDirectory();
+
+    final assetsRootDirectory = Directory(
+      p.join(applicationSupportDirectory.path, 'vieneu', 'assets'),
+    );
+
+    await assetsRootDirectory.create(recursive: true);
+
+    final manifest = await AssetManifest.loadFromAssetBundle(rootBundle);
+
+    final assetKeys = manifest.listAssets().where((key) {
+      if (key.startsWith('assets/vieneu/model/') ||
+          key.startsWith('assets/vieneu/codec/') ||
+          key.startsWith('assets/sea-g2p/') ||
+          key.startsWith('assets/native/')) {
+        return !key.split('/').last.startsWith('.');
+      }
+
+      return key == 'assets/vieneu/voices_v3_turbo.json';
+    });
+
+    for (final assetKey in assetKeys) {
+      final relativePath = assetKey.substring('assets/'.length);
+      final destination = File(
+        p.join(assetsRootDirectory.path, relativePath),
+      );
+
+      await destination.parent.create(recursive: true);
+
+      if (await destination.exists()) {
+        continue;
+      }
+
+      final data = await rootBundle.load(assetKey);
+      await destination.writeAsBytes(
+        data.buffer.asUint8List(
+          data.offsetInBytes,
+          data.lengthInBytes,
+        ),
+        flush: false,
+      );
+    }
+
+    return assetsRootDirectory.path;
+  }
+
   Future<void> _initialize() async {
     try {
       print('VieNeu: initializing directly on main isolate...');
 
-      final executable = File(Platform.resolvedExecutable);
+      late final String assetsRoot;
+      late final String ortPath;
 
-      final contentsDirectory = executable.parent.parent;
+      if (Platform.isMacOS) {
+        final executable = File(Platform.resolvedExecutable);
+        final contentsDirectory = executable.parent.parent;
 
-      final frameworkDirectory = Directory(
-        '${contentsDirectory.path}/Frameworks',
-      );
+        final frameworkDirectory = Directory(
+          '${contentsDirectory.path}/Frameworks',
+        );
 
-      final appFrameworkDirectory = Directory(
-        '${frameworkDirectory.path}/App.framework',
-      );
+        final appFrameworkDirectory = Directory(
+          '${frameworkDirectory.path}/App.framework',
+        );
 
-      final flutterAssetsDirectory = Directory(
-        '${appFrameworkDirectory.path}/Versions/A/Resources/flutter_assets',
-      );
+        final flutterAssetsDirectory = Directory(
+          '${appFrameworkDirectory.path}/Versions/A/Resources/flutter_assets',
+        );
 
-      final assetsRoot = '${flutterAssetsDirectory.path}/assets';
+        assetsRoot = '${flutterAssetsDirectory.path}/assets';
+        ortPath = '${frameworkDirectory.path}/libonnxruntime.1.24.4.dylib';
+      } else if (Platform.isAndroid) {
+        assetsRoot = await _prepareAndroidAssets();
 
-      final ortPath = '${frameworkDirectory.path}/libonnxruntime.1.24.4.dylib';
+        ortPath = p.join(
+          assetsRoot,
+          'native',
+          'libonnxruntime.so',
+        );
+      } else {
+        throw UnsupportedError(
+          'VieNeu is currently supported on macOS and Android only.',
+        );
+      }
 
       print('VieNeu: assets root = $assetsRoot');
-
       print('VieNeu: ORT path = $ortPath');
 
       final applicationSupportDirectory =
@@ -452,6 +521,12 @@ class _HomePageState extends State<HomePage> {
     final wavPath = _generatedWavPath;
 
     if (wavPath == null) {
+      if (!mounted) return;
+
+      setState(() {
+        _status = 'No generated audio available.';
+      });
+
       return;
     }
 
@@ -473,6 +548,7 @@ class _HomePageState extends State<HomePage> {
     }
 
     _stopPlaybackRequested = false;
+    _stopPlaybackCompleter = Completer<void>();
 
     setState(() {
       _isPlaying = true;
@@ -487,40 +563,74 @@ class _HomePageState extends State<HomePage> {
         'pause=${_pauseUsesAudioLength ? 'audio length' : '${_paddingSeconds}s'}',
       );
 
+      final originalBytes = await wavFile.readAsBytes();
+      final playbackBytes = _trimLeadingSilence(originalBytes);
+
+      if (playbackBytes.length != originalBytes.length) {
+        print(
+          'VieNeu: trimmed leading silence '
+          '(${originalBytes.length - playbackBytes.length} bytes)',
+        );
+      }
+
+      final playbackDuration = _getWavDurationFromBytes(playbackBytes);
+
+      print(
+        'VieNeu: playback WAV duration = '
+        '${playbackDuration.inMilliseconds / 1000.0}s',
+      );
+
+      final source = BytesSource(
+        playbackBytes,
+        mimeType: 'audio/wav',
+      );
+
       for (var i = 0; i < _repeatCount; i++) {
         if (_stopPlaybackRequested) {
           break;
         }
 
-        final process = await Process.start('afplay', [
-          '-r',
-          _playbackSpeed.toStringAsFixed(2),
-          wavPath,
-        ]);
+        await _audioPlayer.setPlaybackRate(_playbackSpeed);
 
-        _playbackProcess = process;
+        final completion = Completer<void>();
 
-        final exitCode = await process.exitCode;
+        late final StreamSubscription<void> completionSubscription;
 
-        _playbackProcess = null;
+        completionSubscription = _audioPlayer.onPlayerComplete.listen((_) {
+          if (!completion.isCompleted) {
+            completion.complete();
+          }
+        });
+
+        try {
+          await _audioPlayer.play(source);
+
+          await Future.any([
+            completion.future,
+            _stopPlaybackCompleter!.future,
+          ]);
+        } finally {
+          await completionSubscription.cancel();
+        }
 
         if (_stopPlaybackRequested) {
           break;
         }
 
-        if (exitCode != 0) {
-          throw StateError('afplay failed with exit code $exitCode');
-        }
-
         if (i < _repeatCount - 1 && !_stopPlaybackRequested) {
           final pauseSeconds = _pauseUsesAudioLength
-              ? await _getWavDurationSeconds(wavPath)
+              ? playbackDuration.inMilliseconds / 1000.0
               : _paddingSeconds;
 
           if (pauseSeconds > 0) {
-            await Future.delayed(
-              Duration(milliseconds: (pauseSeconds * 1000).round()),
-            );
+            await Future.any([
+              Future.delayed(
+                Duration(
+                  milliseconds: (pauseSeconds * 1000).round(),
+                ),
+              ),
+              _stopPlaybackCompleter!.future,
+            ]);
           }
         }
       }
@@ -552,8 +662,10 @@ class _HomePageState extends State<HomePage> {
         _status = 'Playback failed: $error';
       });
     } finally {
-      _playbackProcess = null;
+      await _audioPlayer.stop();
+
       _stopPlaybackRequested = false;
+      _stopPlaybackCompleter = null;
 
       if (mounted) {
         setState(() {
@@ -562,6 +674,7 @@ class _HomePageState extends State<HomePage> {
       }
     }
   }
+  
 
   Future<void> _stopPlayback() async {
     if (!_isPlaying) {
@@ -570,11 +683,336 @@ class _HomePageState extends State<HomePage> {
 
     _stopPlaybackRequested = true;
 
-    final process = _playbackProcess;
+    final stopCompleter = _stopPlaybackCompleter;
 
-    if (process != null) {
-      process.kill(ProcessSignal.sigterm);
+    if (stopCompleter != null && !stopCompleter.isCompleted) {
+      stopCompleter.complete();
     }
+
+    await _audioPlayer.stop();
+  }
+
+  Uint8List _trimLeadingSilence(Uint8List bytes) {
+    if (bytes.length < 44) {
+      return bytes;
+    }
+
+    final data = ByteData.sublistView(bytes);
+
+    final riff = String.fromCharCodes(bytes.sublist(0, 4));
+    final wave = String.fromCharCodes(bytes.sublist(8, 12));
+
+    if (riff != 'RIFF' || wave != 'WAVE') {
+      return bytes;
+    }
+
+    var offset = 12;
+
+    int? audioFormat;
+    int? channels;
+    int? sampleRate;
+    int? blockAlign;
+    int? bitsPerSample;
+
+    int? dataChunkHeaderOffset;
+    int? dataOffset;
+    int? dataSize;
+
+    while (offset + 8 <= bytes.length) {
+      final chunkId = String.fromCharCodes(
+        bytes.sublist(offset, offset + 4),
+      );
+
+      final chunkSize = data.getUint32(
+        offset + 4,
+        Endian.little,
+      );
+
+      final chunkDataStart = offset + 8;
+
+      if (chunkDataStart + chunkSize > bytes.length) {
+        return bytes;
+      }
+
+      if (chunkId == 'fmt ') {
+        if (chunkSize < 16) {
+          return bytes;
+        }
+
+        audioFormat = data.getUint16(
+          chunkDataStart,
+          Endian.little,
+        );
+
+        channels = data.getUint16(
+          chunkDataStart + 2,
+          Endian.little,
+        );
+
+        sampleRate = data.getUint32(
+          chunkDataStart + 4,
+          Endian.little,
+        );
+
+        blockAlign = data.getUint16(
+          chunkDataStart + 12,
+          Endian.little,
+        );
+
+        bitsPerSample = data.getUint16(
+          chunkDataStart + 14,
+          Endian.little,
+        );
+      } else if (chunkId == 'data') {
+        dataChunkHeaderOffset = offset;
+        dataOffset = chunkDataStart;
+        dataSize = chunkSize;
+        break;
+      }
+
+      offset = chunkDataStart + chunkSize;
+
+      if (offset.isOdd) {
+        offset++;
+      }
+    }
+
+    if (audioFormat != 1 ||
+        channels == null ||
+        sampleRate == null ||
+        blockAlign == null ||
+        bitsPerSample != 16 ||
+        dataChunkHeaderOffset == null ||
+        dataOffset == null ||
+        dataSize == null) {
+      return bytes;
+    }
+
+    if (channels <= 0 ||
+        sampleRate <= 0 ||
+        blockAlign <= 0 ||
+        dataSize <= 0) {
+      return bytes;
+    }
+
+    final dataEnd = dataOffset + dataSize;
+
+    if (dataEnd > bytes.length) {
+      return bytes;
+    }
+
+    final totalFrames = dataSize ~/ blockAlign;
+
+    // Analyze 10 ms windows.
+    final windowFrames = math.max(
+      1,
+      (sampleRate / 100).round(),
+    );
+
+    // About -40 dBFS.
+    const silenceRmsThreshold = 0.01;
+
+    var firstSpeechFrame = 0;
+    var consecutiveSpeechWindows = 0;
+
+    for (var windowStart = 0;
+        windowStart < totalFrames;
+        windowStart += windowFrames) {
+      final windowEnd = math.min(
+        windowStart + windowFrames,
+        totalFrames,
+      );
+
+      var sumSquares = 0.0;
+      var sampleCount = 0;
+
+      for (var frame = windowStart; frame < windowEnd; frame++) {
+        final frameOffset = dataOffset + frame * blockAlign;
+
+        for (var channel = 0; channel < channels; channel++) {
+          final sampleOffset = frameOffset + channel * 2;
+
+          if (sampleOffset + 2 > dataEnd) {
+            break;
+          }
+
+          final sample = data.getInt16(
+            sampleOffset,
+            Endian.little,
+          );
+
+          final normalized = sample / 32768.0;
+
+          sumSquares += normalized * normalized;
+          sampleCount++;
+        }
+      }
+
+      if (sampleCount == 0) {
+        return bytes;
+      }
+
+      final rms = math.sqrt(
+        sumSquares / sampleCount,
+      );
+
+      if (rms >= silenceRmsThreshold) {
+        consecutiveSpeechWindows++;
+
+        // Require 20 ms of non-silence before deciding
+        // that actual speech has started.
+        if (consecutiveSpeechWindows >= 2) {
+          firstSpeechFrame = math.max(
+            0,
+            windowStart - windowFrames,
+          );
+
+          break;
+        }
+      } else {
+        consecutiveSpeechWindows = 0;
+      }
+    }
+
+    if (firstSpeechFrame <= 0) {
+      return bytes;
+    }
+
+    // Keep 20 ms of natural lead-in.
+    final paddingFrames = (sampleRate * 0.02).round();
+
+    final trimFrames = math.max(
+      0,
+      firstSpeechFrame - paddingFrames,
+    );
+
+    if (trimFrames <= 0) {
+      return bytes;
+    }
+
+    final trimBytes = trimFrames * blockAlign;
+
+    if (trimBytes >= dataSize) {
+      return bytes;
+    }
+
+    final newDataSize = dataSize - trimBytes;
+
+    // Preserve everything before the data chunk, then copy the
+    // shortened audio data, then preserve everything after it.
+    final newBytes = Uint8List(
+      bytes.length - trimBytes,
+    );
+
+    newBytes.setRange(
+      0,
+      dataOffset,
+      bytes,
+      0,
+    );
+
+    newBytes.setRange(
+      dataOffset,
+      dataOffset + newDataSize,
+      bytes,
+      dataOffset + trimBytes,
+    );
+
+    newBytes.setRange(
+      dataOffset + newDataSize,
+      newBytes.length,
+      bytes,
+      dataEnd,
+    );
+
+    final newData = ByteData.sublistView(newBytes);
+
+    // Update the "data" chunk size.
+    newData.setUint32(
+      dataChunkHeaderOffset + 4,
+      newDataSize,
+      Endian.little,
+    );
+
+    // Update RIFF chunk size.
+    //
+    // RIFF size = total file size - 8.
+    newData.setUint32(
+      4,
+      newBytes.length - 8,
+      Endian.little,
+    );
+
+    return newBytes;
+  }
+
+  Duration _getWavDurationFromBytes(Uint8List bytes) {
+    if (bytes.length < 44) {
+      throw StateError('WAV file is too small to contain a valid header.');
+    }
+
+    final data = ByteData.sublistView(bytes);
+
+    final riff = String.fromCharCodes(bytes.sublist(0, 4));
+    final wave = String.fromCharCodes(bytes.sublist(8, 12));
+
+    if (riff != 'RIFF' || wave != 'WAVE') {
+      throw StateError('Not a valid RIFF/WAVE file.');
+    }
+
+    var offset = 12;
+
+    int? byteRate;
+    int? dataSize;
+
+    while (offset + 8 <= bytes.length) {
+      final chunkId = String.fromCharCodes(
+        bytes.sublist(offset, offset + 4),
+      );
+
+      final chunkSize = data.getUint32(
+        offset + 4,
+        Endian.little,
+      );
+
+      final chunkDataStart = offset + 8;
+
+      if (chunkDataStart + chunkSize > bytes.length) {
+        break;
+      }
+
+      if (chunkId == 'fmt ') {
+        if (chunkSize < 16) {
+          throw StateError('Invalid WAV fmt chunk.');
+        }
+
+        byteRate = data.getUint32(
+          chunkDataStart + 8,
+          Endian.little,
+        );
+      } else if (chunkId == 'data') {
+        dataSize = chunkSize;
+        break;
+      }
+
+      offset = chunkDataStart + chunkSize;
+
+      if (offset.isOdd) {
+        offset++;
+      }
+    }
+
+    if (byteRate == null || dataSize == null) {
+      throw StateError('Could not determine WAV duration.');
+    }
+
+    if (byteRate <= 0 || dataSize <= 0) {
+      throw StateError('Invalid WAV audio format.');
+    }
+
+    return Duration(
+      microseconds: (dataSize * 1000000 / byteRate).round(),
+    );
   }
 
   Future<double> _getWavDurationSeconds(String path) async {
@@ -666,38 +1104,83 @@ class _HomePageState extends State<HomePage> {
     final wavPath = _generatedWavPath;
 
     if (wavPath == null) {
+      if (!mounted) return;
+
       setState(() {
         _status = 'Generate audio first.';
       });
+
       return;
     }
 
     final sourceFile = File(wavPath);
 
     if (!await sourceFile.exists()) {
+      if (!mounted) return;
+
       setState(() {
         _status = 'Generated WAV file no longer exists.';
         _generatedWavPath = null;
       });
+
       return;
     }
 
     try {
-      final suggestedName = File(wavPath).uri.pathSegments.last;
+      final originalBytes = await sourceFile.readAsBytes();
+      final trimmedBytes = _trimLeadingSilence(originalBytes);
 
-      final saveLocation = await getSaveLocation(
-        suggestedName: suggestedName,
-        acceptedTypeGroups: const [
-          XTypeGroup(
-            label: 'WAV audio',
-            extensions: ['wav'],
-            mimeTypes: ['audio/wav'],
-          ),
-        ],
-      );
+      if (trimmedBytes.length != originalBytes.length) {
+        print(
+          'VieNeu: trimmed leading silence for download '
+          '(${originalBytes.length - trimmedBytes.length} bytes)',
+        );
+      } else {
+        print('VieNeu: no leading silence detected for download.');
+      }
 
-      if (saveLocation == null) {
-        // User cancelled the dialog.
+      final suggestedName = p.basename(wavPath);
+
+      String? destinationPath;
+
+      if (Platform.isAndroid) {
+        final directoryPath = await getDirectoryPath(
+          confirmButtonText: 'Select',
+          canCreateDirectories: true,
+        );
+
+        if (directoryPath == null) {
+          return;
+        }
+
+        destinationPath = p.join(
+          directoryPath,
+          suggestedName,
+        );
+      } else if (Platform.isMacOS) {
+        final saveLocation = await getSaveLocation(
+          suggestedName: suggestedName,
+          acceptedTypeGroups: const [
+            XTypeGroup(
+              label: 'WAV audio',
+              extensions: ['wav'],
+              mimeTypes: ['audio/wav'],
+            ),
+          ],
+        );
+
+        if (saveLocation == null) {
+          return;
+        }
+
+        destinationPath = saveLocation.path;
+      } else {
+        throw UnsupportedError(
+          'Download is currently supported on Android and macOS only.',
+        );
+      }
+
+      if (!mounted) {
         return;
       }
 
@@ -705,7 +1188,10 @@ class _HomePageState extends State<HomePage> {
         _status = 'Saving audio...';
       });
 
-      await sourceFile.copy(saveLocation.path);
+      await File(destinationPath).writeAsBytes(
+        trimmedBytes,
+        flush: true,
+      );
 
       if (!mounted) {
         return;
@@ -715,7 +1201,7 @@ class _HomePageState extends State<HomePage> {
         _status = 'Audio downloaded successfully.';
       });
 
-      print('VieNeu: audio downloaded to ${saveLocation.path}');
+      print('VieNeu: trimmed audio downloaded to $destinationPath');
     } catch (error, stackTrace) {
       print('VieNeu: download failed: $error');
       print(stackTrace);
@@ -733,11 +1219,18 @@ class _HomePageState extends State<HomePage> {
   @override
   void dispose() {
     _stopPlaybackRequested = true;
-    _playbackProcess?.kill(ProcessSignal.sigterm);
-    _playbackProcess = null;
+
+    final stopCompleter = _stopPlaybackCompleter;
+
+    if (stopCompleter != null && !stopCompleter.isCompleted) {
+      stopCompleter.complete();
+    }
+
+    _audioPlayer.stop();
 
     _textController.dispose();
     _tts.dispose();
+    _audioPlayer.dispose();
 
     super.dispose();
   }

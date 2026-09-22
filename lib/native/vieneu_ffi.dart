@@ -18,6 +18,9 @@ typedef _TtsCreateDart = Pointer<_NativeTtsEngine> Function(
   Pointer<Utf8> ortPath,
 );
 
+typedef _TtsLastErrorNative = Pointer<Utf8> Function();
+typedef _TtsLastErrorDart = Pointer<Utf8> Function();
+
 typedef _TtsDestroyNative = Void Function(Pointer<_NativeTtsEngine> engine);
 
 typedef _TtsDestroyDart = void Function(Pointer<_NativeTtsEngine> engine);
@@ -100,6 +103,7 @@ class VieNeuFfi {
   late final _TtsClearCacheDart _clearCache;
   late final _FreeStringDart _freeString;
   late final _TtsClearCachedTextDart _clearCachedText;
+  late final _TtsLastErrorDart _lastError;
 
   Pointer<_NativeTtsEngine>? _engine;
 
@@ -135,8 +139,13 @@ class VieNeuFfi {
         );
 
     _freeString = _library.lookupFunction<_FreeStringNative, _FreeStringDart>(
-      'vieneu_free_string',
-    );
+          'vieneu_free_string',
+        );
+
+    _lastError = _library.lookupFunction<
+          _TtsLastErrorNative,
+          _TtsLastErrorDart
+        >('vieneu_tts_last_error');
   }
 
   bool clearCachedText({required String text, required String voiceId}) {
@@ -167,11 +176,6 @@ class VieNeuFfi {
   }
 
   static DynamicLibrary _openLibrary(String? explicitPath) {
-    if (!Platform.isMacOS) {
-      throw UnsupportedError('VieNeuFfi currently supports macOS only.');
-    }
-
-    // Explicit path is useful for development/testing.
     if (explicitPath != null) {
       final file = File(explicitPath);
 
@@ -182,19 +186,18 @@ class VieNeuFfi {
       return DynamicLibrary.open(explicitPath);
     }
 
-    // In the macOS app bundle:
-    //
-    // YourApp.app/
-    //   Contents/
-    //     MacOS/
-    //       vietnamese_shadowing
-    //     Frameworks/
-    //       libvieneu_core.dylib
-    //
+    if (Platform.isAndroid) {
+      return DynamicLibrary.open('libvieneu_core.so');
+    }
+
+    if (!Platform.isMacOS) {
+      throw UnsupportedError(
+        'VieNeu is currently supported on macOS and Android only.',
+      );
+    }
+
     final executablePath = Platform.resolvedExecutable;
-
     final executable = File(executablePath);
-
     final contentsDirectory = executable.parent.parent;
 
     final libraryPath =
@@ -203,7 +206,9 @@ class VieNeuFfi {
     final libraryFile = File(libraryPath);
 
     if (!libraryFile.existsSync()) {
-      throw StateError('Bundled VieNeu native library not found: $libraryPath');
+      throw StateError(
+        'Bundled VieNeu native library not found: $libraryPath',
+      );
     }
 
     return DynamicLibrary.open(libraryPath);
@@ -228,6 +233,19 @@ class VieNeuFfi {
       final engine = _create(assetsPtr, cachePtr, ortPtr);
 
       if (engine == nullptr) {
+        final errorPtr = _lastError();
+
+        if (errorPtr != nullptr) {
+          try {
+            final message = errorPtr.toDartString();
+            throw StateError(
+              'vieneu_tts_create() failed: $message',
+            );
+          } finally {
+            _freeString(errorPtr);
+          }
+        }
+
         throw StateError('vieneu_tts_create() failed.');
       }
 
@@ -276,6 +294,20 @@ class VieNeuFfi {
       final ptr = _synthesize(engine, textPtr, voicePtr);
 
       if (ptr == nullptr) {
+        final errorPtr = _lastError();
+
+        if (errorPtr != nullptr) {
+          try {
+            final message = errorPtr.toDartString();
+
+            if (message.isNotEmpty) {
+              throw StateError(message);
+            }
+          } finally {
+            _freeString(errorPtr);
+          }
+        }
+
         throw StateError('vieneu_tts_synthesize_to_wav() failed.');
       }
 

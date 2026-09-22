@@ -1,0 +1,4 @@
+Invalid argument(s): Failed to load dynamic library
+'libvieneu_core.so': dlopen failed:
+library "libc++_shared.so" not found: needed by /data/app/~~VJRvZaTiWT98GZORP41b7g==/com.example.vietnamese_shadowing-iNDJykoYhvCiIVv7qUf3FQ==/base.apk!/lib/arm64-v8a/libvieneu_core.so in namespace clns-9
+See also: https://docs.flutter.dev/testing/errors

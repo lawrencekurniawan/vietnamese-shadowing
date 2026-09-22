@@ -1,3 +1,4 @@
+#[cfg(target_vendor = "apple")]
 #[link(name = "Accelerate", kind = "framework")]
 unsafe extern "C" {
     fn cblas_sgemv(
@@ -16,13 +17,35 @@ unsafe extern "C" {
     );
 }
 
+#[cfg(not(target_vendor = "apple"))]
+fn matrix_vector_multiply(
+    matrix: &[f32],
+    rows: usize,
+    cols: usize,
+    vector: &[f32],
+    output: &mut [f32],
+) {
+    debug_assert_eq!(matrix.len(), rows * cols);
+    debug_assert_eq!(vector.len(), cols);
+    debug_assert_eq!(output.len(), rows);
+
+    for row in 0..rows {
+        let mut sum = 0.0f32;
+
+        for col in 0..cols {
+            sum += matrix[row * cols + col] * vector[col];
+        }
+
+        output[row] = sum;
+    }
+}
+
 use std::fs;
 use std::path::Path;
 
 use serde_json::Value;
 
 use crate::prompt::VieNeuPrompt;
-use crate::voice::VoicePreset;
 
 pub struct VieNeuHeads {
     pub text_emb: Vec<f32>,
@@ -94,6 +117,7 @@ impl VieNeuHeads {
 
         let mut projected = vec![0.0f32; self.hidden_size];
 
+        #[cfg(target_vendor = "apple")]
         unsafe {
             cblas_sgemv(
                 101, // CblasRowMajor
@@ -110,6 +134,15 @@ impl VieNeuHeads {
                 1,
             );
         }
+
+        #[cfg(not(target_vendor = "apple"))]
+        matrix_vector_multiply(
+            &self.xvec_w,
+            self.hidden_size,
+            192,
+            speaker_emb,
+            &mut projected,
+        );
 
         // Add bias after the matrix-vector multiplication.
         for i in 0..self.hidden_size {

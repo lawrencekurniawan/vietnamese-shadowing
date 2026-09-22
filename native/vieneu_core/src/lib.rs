@@ -9,6 +9,21 @@ pub mod wav;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
+use std::sync::Mutex;
+
+static LAST_TTS_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_last_tts_error(message: impl Into<String>) {
+    if let Ok(mut error) = LAST_TTS_ERROR.lock() {
+        *error = Some(message.into());
+    }
+}
+
+fn clear_last_tts_error() {
+    if let Ok(mut error) = LAST_TTS_ERROR.lock() {
+        *error = None;
+    }
+}
 
 use sea_g2p_rs::g2p::G2PEngine;
 
@@ -114,50 +129,90 @@ pub extern "C" fn vieneu_tts_create(
     cache_root: *const c_char,
     ort_path: *const c_char,
 ) -> *mut VieNeuTtsNativeEngine {
+    clear_last_tts_error();
+
     if assets_root.is_null() || cache_root.is_null() || ort_path.is_null() {
+        set_last_tts_error("vieneu_tts_create(): received null argument");
         return std::ptr::null_mut();
     }
 
     let assets_root = unsafe { CStr::from_ptr(assets_root) };
-
     let cache_root = unsafe { CStr::from_ptr(cache_root) };
-
     let ort_path = unsafe { CStr::from_ptr(ort_path) };
 
     let assets_root = match assets_root.to_str() {
         Ok(value) => value,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let cache_root = match cache_root.to_str() {
-        Ok(value) => value,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let ort_path = match ort_path.to_str() {
-        Ok(value) => value,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    eprintln!("VieNeu native: calling from_assets_root_with_ort()...");
-
-    let mut engine = match VieNeuEngine::from_assets_root_with_ort(assets_root, ort_path) {
-        Ok(engine) => engine,
         Err(error) => {
-            eprintln!("VieNeu native engine creation failed: {}", error);
+            set_last_tts_error(format!("Invalid assets_root UTF-8: {error}"));
             return std::ptr::null_mut();
         }
     };
 
+    let cache_root = match cache_root.to_str() {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_tts_error(format!("Invalid cache_root UTF-8: {error}"));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let ort_path = match ort_path.to_str() {
+        Ok(value) => value,
+        Err(error) => {
+            set_last_tts_error(format!("Invalid ort_path UTF-8: {error}"));
+            return std::ptr::null_mut();
+        }
+    };
+
+    eprintln!("VieNeu native: calling from_assets_root_with_ort()...");
+
+    let mut engine =
+        match VieNeuEngine::from_assets_root_with_ort(assets_root, ort_path) {
+            Ok(engine) => engine,
+            Err(error) => {
+                let message = error.to_string();
+                eprintln!(
+                    "VieNeu native engine creation failed: {}",
+                    message
+                );
+                set_last_tts_error(message);
+                return std::ptr::null_mut();
+            }
+        };
+
     eprintln!("VieNeu native: from_assets_root_with_ort() returned");
 
     if let Err(error) = engine.set_cache_directory(cache_root) {
-        eprintln!("VieNeu cache initialization failed: {}", error);
-
+        let message = error.to_string();
+        eprintln!("VieNeu cache initialization failed: {}", message);
+        set_last_tts_error(message);
         return std::ptr::null_mut();
     }
 
     Box::into_raw(Box::new(VieNeuTtsNativeEngine { engine }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn vieneu_tts_last_error() -> *mut c_char {
+    let message = match LAST_TTS_ERROR.lock() {
+        Ok(error) => match error.as_ref() {
+            Some(message) => message.clone(),
+            None => return std::ptr::null_mut(),
+        },
+        Err(_) => {
+            return match CString::new(
+                "Failed to lock native error state",
+            ) {
+                Ok(message) => message.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            };
+        }
+    };
+
+    match CString::new(message) {
+        Ok(value) => value.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Destroy the native VieNeu TTS engine.
@@ -191,6 +246,8 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
     text: *const c_char,
     voice_id: *const c_char,
 ) -> *mut c_char {
+    clear_last_tts_error();
+
     if engine.is_null() || text.is_null() || voice_id.is_null() {
         return std::ptr::null_mut();
     }
@@ -203,14 +260,20 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
 
     let text = match text.to_str() {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
+            let message = format!("Invalid text UTF-8: {error}");
+            eprintln!("VieNeu native: {}", message);
+            set_last_tts_error(message);
             return std::ptr::null_mut();
         }
     };
 
     let voice_id = match voice_id.to_str() {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
+            let message = format!("Invalid voice_id UTF-8: {error}");
+            eprintln!("VieNeu native: {}", message);
+            set_last_tts_error(message);
             return std::ptr::null_mut();
         }
     };
@@ -219,7 +282,10 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
         Ok(result) => result,
 
         Err(error) => {
-            eprintln!("VieNeu native: synthesis failed: {}", error);
+            let message = error.to_string();
+
+            eprintln!("VieNeu native: synthesis failed: {}", message);
+            set_last_tts_error(message);
 
             return std::ptr::null_mut();
         }
@@ -235,10 +301,14 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
         Some(path) => path,
 
         None => {
-            eprintln!(
-                "VieNeu native: synthesis produced \
-                     no cache file because EOS was not reached"
+            let message = format!(
+                "Synthesis completed but EOS was not reached; \
+                no cached WAV was produced for voice '{}'",
+                voice_id
             );
+
+            eprintln!("VieNeu native: {}", message);
+            set_last_tts_error(message);
 
             return std::ptr::null_mut();
         }
