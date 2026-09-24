@@ -259,13 +259,26 @@ impl VieNeuEngine {
 
         match ort_path {
             Some(path) => {
-                eprintln!("VieNeu Rust: using explicit ORT path = {}", path.display());
+                #[cfg(not(target_os = "ios"))]
+                {
+                    eprintln!(
+                        "VieNeu Rust: using explicit ORT path = {}",
+                        path.display()
+                    );
+                    Self::preload_onnxruntime_from_path(path)?;
+                }
 
-                Self::preload_onnxruntime_from_path(path)?;
+                #[cfg(target_os = "ios")]
+                {
+                    return Err(EngineError::Model(format!(
+                        "Explicit ONNX Runtime path is not supported on iOS: {}",
+                        path.display()
+                    )));
+                }
             }
 
             None => {
-                eprintln!("VieNeu Rust: using default ORT discovery");
+                eprintln!("VieNeu Rust: initializing ONNX Runtime");
 
                 Self::preload_onnxruntime()?;
             }
@@ -361,6 +374,7 @@ impl VieNeuEngine {
         Ok(())
     }
 
+    #[cfg(not(target_os = "ios"))]
     fn preload_onnxruntime() -> Result<(), EngineError> {
         // ---------------------------------------------------------
         // 1. Prefer the ONNX Runtime bundled inside the macOS app.
@@ -427,6 +441,21 @@ impl VieNeuEngine {
         Ok(())
     }
 
+    #[cfg(target_os = "ios")]
+    fn preload_onnxruntime() -> Result<(), EngineError> {
+        eprintln!("VieNeu Rust: ONNX Runtime is statically linked on iOS.");
+
+        let committed = ort::init().commit();
+
+        eprintln!(
+            "VieNeu Rust: iOS ONNX Runtime environment commit = {}",
+            committed
+        );
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "ios"))]
     fn preload_onnxruntime_from_path(path: &Path) -> Result<(), EngineError> {
         if !path.is_file() {
             return Err(EngineError::Model(format!(

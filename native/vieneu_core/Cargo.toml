@@ -12,6 +12,11 @@ sea-g2p-rs = { package = "sea-g2p-rs", path = "../../tools/sea-g2p-native" }
 tokenizers = "0.23.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 ndarray = "0.17"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+ort = { version = "2.0.0-rc.12" }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
