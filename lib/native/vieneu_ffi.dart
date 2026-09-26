@@ -62,6 +62,9 @@ typedef _TtsClearCachedTextDart = int Function(
   Pointer<Utf8> voiceId,
 );
 
+typedef _TtsLastErrorNative = Pointer<Utf8> Function();
+typedef _TtsLastErrorDart = Pointer<Utf8> Function();
+
 class VietnameseVoice {
   final String id;
   final String name;
@@ -100,6 +103,7 @@ class VieNeuFfi {
   late final _TtsClearCacheDart _clearCache;
   late final _FreeStringDart _freeString;
   late final _TtsClearCachedTextDart _clearCachedText;
+  late final _TtsLastErrorDart _lastError;
 
   Pointer<_NativeTtsEngine>? _engine;
 
@@ -137,6 +141,11 @@ class VieNeuFfi {
     _freeString = _library.lookupFunction<_FreeStringNative, _FreeStringDart>(
       'vieneu_free_string',
     );
+
+    _lastError = _library
+        .lookupFunction<_TtsLastErrorNative, _TtsLastErrorDart>(
+          'vieneu_tts_last_error',
+        );
   }
 
   bool clearCachedText({required String text, required String voiceId}) {
@@ -167,8 +176,20 @@ class VieNeuFfi {
   }
 
   static DynamicLibrary _openLibrary(String? explicitPath) {
+    if (Platform.isIOS) {
+      if (explicitPath != null) {
+        throw UnsupportedError(
+          'Explicit native library paths are not supported on iOS.',
+        );
+      }
+
+      return DynamicLibrary.process();
+    }
+
     if (!Platform.isMacOS) {
-      throw UnsupportedError('VieNeuFfi currently supports macOS only.');
+      throw UnsupportedError(
+        'VieNeuFfi currently supports macOS and iOS only.',
+      );
     }
 
     // Explicit path is useful for development/testing.
@@ -182,26 +203,14 @@ class VieNeuFfi {
       return DynamicLibrary.open(explicitPath);
     }
 
-    // In the macOS app bundle:
-    //
-    // YourApp.app/
-    //   Contents/
-    //     MacOS/
-    //       vietnamese_shadowing
-    //     Frameworks/
-    //       libvieneu_core.dylib
-    //
     final executablePath = Platform.resolvedExecutable;
-
     final executable = File(executablePath);
-
     final contentsDirectory = executable.parent.parent;
 
     final libraryPath =
         '${contentsDirectory.path}/Frameworks/libvieneu_core.dylib';
 
     final libraryFile = File(libraryPath);
-
     if (!libraryFile.existsSync()) {
       throw StateError('Bundled VieNeu native library not found: $libraryPath');
     }
@@ -212,32 +221,39 @@ class VieNeuFfi {
   void create({
     required String assetsRoot,
     required String cacheRoot,
-    required String ortPath,
+    String? ortPath,
   }) {
     if (_engine != null) {
       return;
     }
 
     final assetsPtr = assetsRoot.toNativeUtf8();
-
     final cachePtr = cacheRoot.toNativeUtf8();
-
-    final ortPtr = ortPath.toNativeUtf8();
+    final ortPtr = ortPath?.toNativeUtf8() ?? nullptr;
 
     try {
       final engine = _create(assetsPtr, cachePtr, ortPtr);
 
       if (engine == nullptr) {
-        throw StateError('vieneu_tts_create() failed.');
+        final errorPtr = _lastError();
+        String message = 'vieneu_tts_create() failed.';
+
+        if (errorPtr != nullptr) {
+          message = errorPtr.toDartString();
+          _freeString(errorPtr);
+        }
+
+        throw StateError(message);
       }
 
       _engine = engine;
     } finally {
       malloc.free(assetsPtr);
-
       malloc.free(cachePtr);
 
-      malloc.free(ortPtr);
+      if (ortPtr != nullptr) {
+        malloc.free(ortPtr);
+      }
     }
   }
 
@@ -276,7 +292,16 @@ class VieNeuFfi {
       final ptr = _synthesize(engine, textPtr, voicePtr);
 
       if (ptr == nullptr) {
-        throw StateError('vieneu_tts_synthesize_to_wav() failed.');
+        final errorPtr = _lastError();
+
+        var message = 'vieneu_tts_synthesize_to_wav() failed.';
+
+        if (errorPtr != nullptr) {
+          message = errorPtr.toDartString();
+          _freeString(errorPtr);
+        }
+
+        throw StateError(message);
       }
 
       try {

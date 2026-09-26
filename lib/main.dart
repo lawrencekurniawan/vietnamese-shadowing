@@ -1,3 +1,9 @@
+import 'package:share_plus/share_plus.dart' as share_plus;
+import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter/services.dart';
+
+import 'native/vieneu_asset_stager.dart';
+
 import 'dart:typed_data';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -96,29 +102,24 @@ class _HomePageState extends State<HomePage> {
     try {
       print('VieNeu: initializing directly on main isolate...');
 
-      final executable = File(Platform.resolvedExecutable);
+      final String? ortPath;
 
-      final contentsDirectory = executable.parent.parent;
+      if (Platform.isIOS) {
+        ortPath = null;
+        print('VieNeu: iOS uses statically linked ONNX Runtime.');
+      } else if (Platform.isMacOS) {
+        final executable = File(Platform.resolvedExecutable);
+        final contentsDirectory = executable.parent.parent;
 
-      final frameworkDirectory = Directory(
-        '${contentsDirectory.path}/Frameworks',
-      );
+        final frameworkDirectory = Directory(
+          '${contentsDirectory.path}/Frameworks',
+        );
 
-      final appFrameworkDirectory = Directory(
-        '${frameworkDirectory.path}/App.framework',
-      );
-
-      final flutterAssetsDirectory = Directory(
-        '${appFrameworkDirectory.path}/Versions/A/Resources/flutter_assets',
-      );
-
-      final assetsRoot = '${flutterAssetsDirectory.path}/assets';
-
-      final ortPath = '${frameworkDirectory.path}/libonnxruntime.1.24.4.dylib';
-
-      print('VieNeu: assets root = $assetsRoot');
-
-      print('VieNeu: ORT path = $ortPath');
+        ortPath = '${frameworkDirectory.path}/libonnxruntime.1.24.4.dylib';
+        print('VieNeu: ORT path = $ortPath');
+      } else {
+        throw UnsupportedError('VieNeu currently supports iOS and macOS only.');
+      }
 
       final applicationSupportDirectory =
           await getApplicationSupportDirectory();
@@ -141,13 +142,19 @@ class _HomePageState extends State<HomePage> {
         _status = 'Loading VieNeu models...';
       });
 
+      print('VieNeu: BEFORE native engine create');
+
+      final stagedAssetsRoot = await VieNeuAssetStager.stage();
+
+      print('VieNeu: staged assets root = ${stagedAssetsRoot.path}');
+
       _tts.create(
-        assetsRoot: assetsRoot,
+        assetsRoot: stagedAssetsRoot.path,
         cacheRoot: cacheRoot,
         ortPath: ortPath,
       );
 
-      print('VieNeu: native engine created.');
+      print('VieNeu: AFTER native engine create');
 
       final voices = _tts.listVoices();
 
@@ -479,6 +486,8 @@ class _HomePageState extends State<HomePage> {
       _status = 'Playing...';
     });
 
+    final player = AudioPlayer();
+
     try {
       print('VieNeu: playing $wavPath');
       print(
@@ -492,27 +501,16 @@ class _HomePageState extends State<HomePage> {
           break;
         }
 
-        final process = await Process.start('afplay', [
-          '-r',
-          _playbackSpeed.toStringAsFixed(2),
-          wavPath,
-        ]);
+        await player.play(DeviceFileSource(wavPath));
+        await player.setPlaybackRate(_playbackSpeed);
 
-        _playbackProcess = process;
-
-        final exitCode = await process.exitCode;
-
-        _playbackProcess = null;
+        await player.onPlayerComplete.first;
 
         if (_stopPlaybackRequested) {
           break;
         }
 
-        if (exitCode != 0) {
-          throw StateError('afplay failed with exit code $exitCode');
-        }
-
-        if (i < _repeatCount - 1 && !_stopPlaybackRequested) {
+        if (i < _repeatCount - 1) {
           final pauseSeconds = _pauseUsesAudioLength
               ? await _getWavDurationSeconds(wavPath)
               : _paddingSeconds;
@@ -552,7 +550,7 @@ class _HomePageState extends State<HomePage> {
         _status = 'Playback failed: $error';
       });
     } finally {
-      _playbackProcess = null;
+      await player.dispose();
       _stopPlaybackRequested = false;
 
       if (mounted) {
@@ -683,7 +681,52 @@ class _HomePageState extends State<HomePage> {
     }
 
     try {
-      final suggestedName = File(wavPath).uri.pathSegments.last;
+      final now = DateTime.now();
+
+      final timestamp =
+          '${now.year.toString().padLeft(4, '0')}'
+          '${now.month.toString().padLeft(2, '0')}'
+          '${now.day.toString().padLeft(2, '0')}_'
+          '${now.hour.toString().padLeft(2, '0')}'
+          '${now.minute.toString().padLeft(2, '0')}'
+          '${now.second.toString().padLeft(2, '0')}';
+
+      final originalName = sourceFile.uri.pathSegments.last;
+
+      final cacheDatePrefix = RegExp(r'^\d{8}__');
+      final baseName = originalName.replaceFirst(cacheDatePrefix, '');
+
+      final suggestedName = '${timestamp}__$baseName';
+
+      if (Platform.isIOS) {
+        setState(() {
+          _status = 'Opening share sheet...';
+        });
+
+        await share_plus.SharePlus.instance.share(
+          share_plus.ShareParams(
+            title: 'Vietnamese Shadowing Audio',
+            files: [
+              share_plus.XFile(
+                wavPath,
+                name: suggestedName,
+                mimeType: 'audio/wav',
+              ),
+            ],
+          ),
+        );
+
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _status = 'Share sheet closed.';
+        });
+
+        print('VieNeu: iOS share sheet closed.');
+        return;
+      }
 
       final saveLocation = await getSaveLocation(
         suggestedName: suggestedName,
@@ -697,7 +740,6 @@ class _HomePageState extends State<HomePage> {
       );
 
       if (saveLocation == null) {
-        // User cancelled the dialog.
         return;
       }
 

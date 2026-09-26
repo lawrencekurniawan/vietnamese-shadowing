@@ -2,11 +2,42 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 
+const SILENCE_THRESHOLD: f32 = 0.002;
+const PADDING_MS: u32 = 20;
+
+fn trim_silence(samples: &[f32], sample_rate: u32) -> &[f32] {
+    if samples.is_empty() {
+        return samples;
+    }
+
+    let first = samples
+        .iter()
+        .position(|sample| sample.abs() > SILENCE_THRESHOLD);
+
+    let last = samples
+        .iter()
+        .rposition(|sample| sample.abs() > SILENCE_THRESHOLD);
+
+    let (first, last) = match (first, last) {
+        (Some(first), Some(last)) if first <= last => (first, last),
+        _ => return samples,
+    };
+
+    let padding = ((sample_rate as u64 * PADDING_MS as u64) / 1000) as usize;
+
+    let start = first.saturating_sub(padding);
+    let end = (last + padding + 1).min(samples.len());
+
+    &samples[start..end]
+}
+
 pub fn write_wav_mono_f32(
     path: impl AsRef<Path>,
     samples: &[f32],
     sample_rate: u32,
 ) -> io::Result<()> {
+    let samples = trim_silence(samples, sample_rate);
+
     // Convert float32 [-1, 1] to signed 16-bit PCM.
     let mut pcm = Vec::with_capacity(samples.len() * 2);
 

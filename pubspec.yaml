@@ -38,6 +38,8 @@ dependencies:
   ffi: ^2.2.0
   file_selector: ^1.1.0
   shared_preferences: ^2.5.5
+  audioplayers: ^6.8.1
+  share_plus: ^13.3.0
 
 dev_dependencies:
   flutter_test:

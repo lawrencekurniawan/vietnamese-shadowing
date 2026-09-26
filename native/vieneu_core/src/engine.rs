@@ -170,7 +170,14 @@ impl VieNeuEngine {
     }
 
     pub fn from_assets_root(assets_root: impl AsRef<Path>) -> Result<Self, EngineError> {
-        Self::from_assets_root_with_optional_ort(assets_root, None)
+        let assets_root = assets_root.as_ref();
+
+        let model_dir = assets_root.join("vieneu/model");
+        let codec_dir = assets_root.join("vieneu/codec");
+        let voices_path = assets_root.join("vieneu/voices_v3_turbo.json");
+        let dict_path = assets_root.join("sea-g2p/sea_g2p.bin");
+
+        Self::new_with_ort(model_dir, codec_dir, voices_path, dict_path, None)
     }
 
     pub fn from_assets_root_with_ort(
@@ -195,7 +202,6 @@ impl VieNeuEngine {
             Self::new_with_ort(model_dir, codec_dir, voices_path, dict_path, Some(ort_path))?;
 
         eprintln!("VieNeu Rust: new_with_ort() returned");
-
         Ok(engine)
     }
 
@@ -203,11 +209,8 @@ impl VieNeuEngine {
         assets_root: impl AsRef<Path>,
         ort_path: Option<&Path>,
     ) -> Result<Self, EngineError> {
-        let assets_root = assets_root.as_ref();
-
         match ort_path {
             Some(path) => Self::from_assets_root_with_ort(assets_root, path),
-
             None => Self::from_assets_root(assets_root),
         }
     }
@@ -364,14 +367,40 @@ impl VieNeuEngine {
     }
 
     fn check_file(path: &Path) -> Result<(), EngineError> {
-        if !path.is_file() {
-            return Err(EngineError::Io(format!(
-                "Required file does not exist: {}",
-                path.display()
-            )));
-        }
+        match std::fs::metadata(path) {
+            Ok(metadata) => {
+                eprintln!(
+                    "VieNeu Rust: file check OK: {} (is_file={})",
+                    path.display(),
+                    metadata.is_file()
+                );
 
-        Ok(())
+                if !metadata.is_file() {
+                    return Err(EngineError::Io(format!(
+                        "Path exists but is not a regular file: {}",
+                        path.display()
+                    )));
+                }
+
+                Ok(())
+            }
+            Err(error) => {
+                eprintln!(
+                    "VieNeu Rust: file check FAILED: {} => {} (kind={:?}, raw_os_error={:?})",
+                    path.display(),
+                    error,
+                    error.kind(),
+                    error.raw_os_error()
+                );
+
+                Err(EngineError::Io(format!(
+                    "Could not access required file {}: {} (raw_os_error={:?})",
+                    path.display(),
+                    error,
+                    error.raw_os_error()
+                )))
+            }
+        }
     }
 
     #[cfg(not(target_os = "ios"))]

@@ -7,6 +7,26 @@ pub mod tokenizer;
 pub mod voice;
 pub mod wav;
 
+use std::sync::{Mutex, OnceLock};
+
+static LAST_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+fn set_last_error(message: impl Into<String>) {
+    let mutex = LAST_ERROR.get_or_init(|| Mutex::new(None));
+
+    if let Ok(mut error) = mutex.lock() {
+        *error = Some(message.into());
+    }
+}
+
+fn clear_last_error() {
+    let mutex = LAST_ERROR.get_or_init(|| Mutex::new(None));
+
+    if let Ok(mut error) = mutex.lock() {
+        *error = None;
+    }
+}
+
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
@@ -114,50 +134,88 @@ pub extern "C" fn vieneu_tts_create(
     cache_root: *const c_char,
     ort_path: *const c_char,
 ) -> *mut VieNeuTtsNativeEngine {
-    if assets_root.is_null() || cache_root.is_null() || ort_path.is_null() {
+    clear_last_error();
+
+    if assets_root.is_null() || cache_root.is_null() {
+        set_last_error("assets_root or cache_root is null");
         return std::ptr::null_mut();
     }
 
     let assets_root = unsafe { CStr::from_ptr(assets_root) };
-
     let cache_root = unsafe { CStr::from_ptr(cache_root) };
 
-    let ort_path = unsafe { CStr::from_ptr(ort_path) };
+    let ort_path = if ort_path.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(ort_path) }.to_str() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                set_last_error("ort_path is not valid UTF-8");
+                return std::ptr::null_mut();
+            }
+        }
+    };
 
     let assets_root = match assets_root.to_str() {
         Ok(value) => value,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let cache_root = match cache_root.to_str() {
-        Ok(value) => value,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    let ort_path = match ort_path.to_str() {
-        Ok(value) => value,
-        Err(_) => return std::ptr::null_mut(),
-    };
-
-    eprintln!("VieNeu native: calling from_assets_root_with_ort()...");
-
-    let mut engine = match VieNeuEngine::from_assets_root_with_ort(assets_root, ort_path) {
-        Ok(engine) => engine,
-        Err(error) => {
-            eprintln!("VieNeu native engine creation failed: {}", error);
+        Err(_) => {
+            set_last_error("assets_root is not valid UTF-8");
             return std::ptr::null_mut();
         }
     };
 
-    eprintln!("VieNeu native: from_assets_root_with_ort() returned");
+    let cache_root = match cache_root.to_str() {
+        Ok(value) => value,
+        Err(_) => {
+            set_last_error("cache_root is not valid UTF-8");
+            return std::ptr::null_mut();
+        }
+    };
+
+    eprintln!("VieNeu native: calling from_assets_root_with_optional_ort()...");
+
+    let mut engine =
+        match VieNeuEngine::from_assets_root_with_optional_ort(
+            assets_root,
+            ort_path.map(std::path::Path::new),
+        ) {
+            Ok(engine) => engine,
+            Err(error) => {
+                set_last_error(error.to_string());
+                eprintln!("VieNeu native engine creation failed: {}", error);
+                return std::ptr::null_mut();
+            }
+        };
+
+    eprintln!("VieNeu native: from_assets_root_with_optional_ort() returned");
 
     if let Err(error) = engine.set_cache_directory(cache_root) {
+        set_last_error(error.to_string());
         eprintln!("VieNeu cache initialization failed: {}", error);
-
         return std::ptr::null_mut();
     }
 
+    clear_last_error();
+
     Box::into_raw(Box::new(VieNeuTtsNativeEngine { engine }))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn vieneu_tts_last_error() -> *mut c_char {
+    let mutex = LAST_ERROR.get_or_init(|| Mutex::new(None));
+
+    let message = match mutex.lock() {
+        Ok(error) => match error.as_ref() {
+            Some(message) => message.clone(),
+            None => return std::ptr::null_mut(),
+        },
+        Err(_) => return std::ptr::null_mut(),
+    };
+
+    match CString::new(message) {
+        Ok(value) => value.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Destroy the native VieNeu TTS engine.
@@ -191,19 +249,22 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
     text: *const c_char,
     voice_id: *const c_char,
 ) -> *mut c_char {
+    clear_last_error();
+
     if engine.is_null() || text.is_null() || voice_id.is_null() {
+        set_last_error("engine, text, or voice_id is null");
         return std::ptr::null_mut();
     }
 
     let engine = unsafe { &mut *engine };
 
     let text = unsafe { CStr::from_ptr(text) };
-
     let voice_id = unsafe { CStr::from_ptr(voice_id) };
 
     let text = match text.to_str() {
         Ok(value) => value,
         Err(_) => {
+            set_last_error("text is not valid UTF-8");
             return std::ptr::null_mut();
         }
     };
@@ -211,6 +272,7 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
     let voice_id = match voice_id.to_str() {
         Ok(value) => value,
         Err(_) => {
+            set_last_error("voice_id is not valid UTF-8");
             return std::ptr::null_mut();
         }
     };
@@ -219,7 +281,10 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
         Ok(result) => result,
 
         Err(error) => {
-            eprintln!("VieNeu native: synthesis failed: {}", error);
+            let message = error.to_string();
+
+            eprintln!("VieNeu native: synthesis failed: {}", message);
+            set_last_error(message);
 
             return std::ptr::null_mut();
         }
@@ -228,17 +293,25 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
     eprintln!(
         "VieNeu native: synthesis result: \
          cache_hit={}, frames_generated={}, eos_reached={}",
-        result.cache_hit, result.frames_generated, result.eos_reached
+        result.cache_hit,
+        result.frames_generated,
+        result.eos_reached
     );
 
     let cache_path = match engine.engine.cached_audio_path(text, voice_id) {
         Some(path) => path,
 
         None => {
-            eprintln!(
-                "VieNeu native: synthesis produced \
-                     no cache file because EOS was not reached"
+            let message = format!(
+                "Synthesis completed without EOS cache file: \
+                cache_hit={}, frames_generated={}, eos_reached={}",
+                result.cache_hit,
+                result.frames_generated,
+                result.eos_reached,
             );
+
+            eprintln!("VieNeu native: {}", message);
+            set_last_error(message);
 
             return std::ptr::null_mut();
         }
@@ -253,11 +326,11 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
         Ok(value) => value.into_raw(),
 
         Err(error) => {
-            eprintln!(
-                "VieNeu native: failed to create \
-                 synthesis response: {}",
-                error
-            );
+            let message =
+                format!("Failed to create synthesis response: {}", error);
+
+            eprintln!("VieNeu native: {}", message);
+            set_last_error(message);
 
             std::ptr::null_mut()
         }

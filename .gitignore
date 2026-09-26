@@ -62,3 +62,7 @@ app.*.map.json
 
 # Local VieNeu reference test audio
 **/vieneu_test.wav
+
+# Generated native Rust libraries
+ios/Runner/Native/*.a
+ios/Runner/Native/**/*.a
