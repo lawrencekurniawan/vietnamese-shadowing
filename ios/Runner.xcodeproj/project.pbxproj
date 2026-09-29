@@ -16,8 +16,8 @@
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
-		C1D6B4C1306676A500E4DFFC /* libvieneu_core.a in Frameworks */ = {isa = PBXBuildFile; fileRef = C1D6B4C0306676A500E4DFFC /* libvieneu_core.a */; };
 		C1D6B4C53067C07A00E4DFFC /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C1D6B4C43067C07A00E4DFFC /* Accelerate.framework */; };
+		C1D6B4C73067F57B00E4DFFC /* VieNeuCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = C1D6B4C63067F57B00E4DFFC /* VieNeuCore.xcframework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -64,6 +64,7 @@
 		C1D6B4C0306676A500E4DFFC /* libvieneu_core.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libvieneu_core.a; path = Runner/Native/libvieneu_core.a; sourceTree = "<group>"; };
 		C1D6B4C230667A7D00E4DFFC /* libonnxruntime.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libonnxruntime.a; path = Runner/Native/onnxruntime/libonnxruntime.a; sourceTree = "<group>"; };
 		C1D6B4C43067C07A00E4DFFC /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
+		C1D6B4C63067F57B00E4DFFC /* VieNeuCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = VieNeuCore.xcframework; path = Runner/Native/VieNeuCore.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -71,8 +72,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C1D6B4C73067F57B00E4DFFC /* VieNeuCore.xcframework in Frameworks */,
 				C1D6B4C53067C07A00E4DFFC /* Accelerate.framework in Frameworks */,
-				C1D6B4C1306676A500E4DFFC /* libvieneu_core.a in Frameworks */,
 				78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -139,6 +140,7 @@
 		C1D6B4BF306676A500E4DFFC /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				C1D6B4C63067F57B00E4DFFC /* VieNeuCore.xcframework */,
 				C1D6B4C43067C07A00E4DFFC /* Accelerate.framework */,
 				C1D6B4C230667A7D00E4DFFC /* libonnxruntime.a */,
 				C1D6B4C0306676A500E4DFFC /* libvieneu_core.a */,
@@ -414,6 +416,7 @@
 					"-Wl,-u,_vieneu_tts_clear_cache",
 					"-Wl,-u,_vieneu_tts_clear_cached_text",
 					"-Wl,-u,_vieneu_free_string",
+				"-Wl,-u,_vieneu_tts_last_error",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.vietnameseShadowing;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -610,6 +613,7 @@
 					"-Wl,-u,_vieneu_tts_clear_cache",
 					"-Wl,-u,_vieneu_tts_clear_cached_text",
 					"-Wl,-u,_vieneu_free_string",
+				"-Wl,-u,_vieneu_tts_last_error",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.vietnameseShadowing;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -646,6 +650,7 @@
 					"-Wl,-u,_vieneu_tts_clear_cache",
 					"-Wl,-u,_vieneu_tts_clear_cached_text",
 					"-Wl,-u,_vieneu_free_string",
+				"-Wl,-u,_vieneu_tts_last_error",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.vietnameseShadowing;
 				PRODUCT_NAME = "$(TARGET_NAME)";
