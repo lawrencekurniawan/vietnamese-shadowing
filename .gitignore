@@ -70,3 +70,13 @@ ios/Runner/Native/**/*.a
 ios/Runner/Native/VieNeuCore.xcframework/
 ios/Runner/Native/libvieneu_core.a
 ios/Runner/Native/onnxruntime/
+# Downloaded/generated VieNeu runtime model assets. Recreate with:
+# uv run --with huggingface_hub --with numpy python scripts/prepare_vieneu_model.py
+/assets/vieneu/model/
+
+# Temporary native TTS test output and helpers
+/rust_tts.wav
+/rust_tts_wav.f32
+/native/vieneu_core/examples/make_test_anchor.rs
+/tools/sea-g2p-native/examples/normalizer_check.rs
+/tools/vieneu-reference/direct_generation/
