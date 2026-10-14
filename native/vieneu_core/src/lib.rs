@@ -174,18 +174,17 @@ pub extern "C" fn vieneu_tts_create(
 
     eprintln!("VieNeu native: calling from_assets_root_with_optional_ort()...");
 
-    let mut engine =
-        match VieNeuEngine::from_assets_root_with_optional_ort(
-            assets_root,
-            ort_path.map(std::path::Path::new),
-        ) {
-            Ok(engine) => engine,
-            Err(error) => {
-                set_last_error(error.to_string());
-                eprintln!("VieNeu native engine creation failed: {}", error);
-                return std::ptr::null_mut();
-            }
-        };
+    let mut engine = match VieNeuEngine::from_assets_root_with_optional_ort(
+        assets_root,
+        ort_path.map(std::path::Path::new),
+    ) {
+        Ok(engine) => engine,
+        Err(error) => {
+            set_last_error(error.to_string());
+            eprintln!("VieNeu native engine creation failed: {}", error);
+            return std::ptr::null_mut();
+        }
+    };
 
     eprintln!("VieNeu native: from_assets_root_with_optional_ort() returned");
 
@@ -293,9 +292,7 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
     eprintln!(
         "VieNeu native: synthesis result: \
          cache_hit={}, frames_generated={}, eos_reached={}",
-        result.cache_hit,
-        result.frames_generated,
-        result.eos_reached
+        result.cache_hit, result.frames_generated, result.eos_reached
     );
 
     let cache_path = match engine.engine.cached_audio_path(text, voice_id) {
@@ -305,9 +302,7 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
             let message = format!(
                 "Synthesis completed without EOS cache file: \
                 cache_hit={}, frames_generated={}, eos_reached={}",
-                result.cache_hit,
-                result.frames_generated,
-                result.eos_reached,
+                result.cache_hit, result.frames_generated, result.eos_reached,
             );
 
             eprintln!("VieNeu native: {}", message);
@@ -326,8 +321,7 @@ pub extern "C" fn vieneu_tts_synthesize_to_wav(
         Ok(value) => value.into_raw(),
 
         Err(error) => {
-            let message =
-                format!("Failed to create synthesis response: {}", error);
+            let message = format!("Failed to create synthesis response: {}", error);
 
             eprintln!("VieNeu native: {}", message);
             set_last_error(message);

@@ -115,6 +115,375 @@ pub struct VieNeuEngine {
     cache: Option<TtsCache>,
 }
 
+// Sentence splitting for speech synthesis.
+//
+// Splits on sentence-ending punctuation and explicit line breaks.
+// It preserves punctuation and keeps commas inside sentences. This is a
+// practical rule-based splitter, not a complete linguistic parser.
+fn strip_spoken_line_prefix(line: &str) -> &str {
+    let mut line = line.trim();
+
+    // Remove Markdown heading markers such as "# Heading" or "### Heading".
+    let hashes = line.bytes().take_while(|&b| b == b'#').count();
+    if hashes > 0
+        && line[hashes..]
+            .chars()
+            .next()
+            .map(char::is_whitespace)
+            .unwrap_or(false)
+    {
+        line = line[hashes..].trim_start();
+    }
+
+    // Remove common Markdown bullet markers. Numbered lists are intentionally
+    // not handled here.
+    for marker in ["- ", "+ ", "• ", "* ", "‣ ", "– ", "— "] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            line = rest.trim_start();
+            break;
+        }
+    }
+
+    line.trim()
+}
+
+fn is_sentence_punctuation(ch: char) -> bool {
+    matches!(ch, '.' | '?' | '!' | '…')
+}
+
+fn is_closing_delimiter(ch: char) -> bool {
+    matches!(ch, '"' | '\'' | '”' | '’' | '»' | ')' | ']' | '}' | '›')
+}
+
+fn abbreviation_continues(line: &str, period_byte_offset: usize, next_char: char) -> bool {
+    let prefix = &line[..period_byte_offset];
+
+    let token = prefix
+        .split_whitespace()
+        .last()
+        .unwrap_or("")
+        .trim_start_matches(|ch: char| {
+            matches!(
+                ch,
+                '"' | '\'' | '“' | '‘' | '(' | '[' | '{' | '«' | '¿' | ':' | ',' | ';'
+            )
+        })
+        .to_lowercase();
+
+    // These normally introduce or belong to the following word, so their
+    // periods should not split the spoken text.
+    const CONTINUATION_ABBREVIATIONS: &[&str] = &[
+        // Vietnamese names, places, addresses and titles.
+        "tp", "pgs", "ts", "ths", "gs", "bs", "ks", "cn", "tskh", "bscki", "bsckii", "p", "q", "h",
+        "tx", "đ", "x", // English titles and common abbreviations.
+        "dr", "mr", "mrs", "ms", "prof", "sr", "jr", "st", "no", "fig", "inc", "ltd", "co", "dept",
+        "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec", "vs",
+    ];
+
+    if CONTINUATION_ABBREVIATIONS.contains(&token.as_str()) {
+        return true;
+    }
+
+    // These can either continue a sentence or end one. Treat lowercase
+    // following text as continuation; uppercase following text as a likely
+    // new sentence.
+    const CONTEXTUAL_ABBREVIATIONS: &[&str] = &["v.v", "etc", "e.g", "i.e"];
+
+    CONTEXTUAL_ABBREVIATIONS.contains(&token.as_str()) && next_char.is_lowercase()
+}
+
+fn split_one_line_into_sentences(line: &str, output: &mut Vec<String>) {
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let mut start_byte = 0usize;
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        let (byte_offset, ch) = chars[i];
+
+        if !is_sentence_punctuation(ch) {
+            i += 1;
+            continue;
+        }
+
+        // Do not treat periods between digits as sentence boundaries:
+        // 3.14, 1.000.000, 29.09.2026, etc.
+        if ch == '.'
+            && i > 0
+            && i + 1 < chars.len()
+            && chars[i - 1].1.is_ascii_digit()
+            && chars[i + 1].1.is_ascii_digit()
+        {
+            i += 1;
+            continue;
+        }
+
+        // Treat consecutive punctuation such as "...", "?!", and "!!!"
+        // as one unit so it cannot create empty chunks.
+        let punctuation_start = i;
+        let mut punctuation_end = i;
+
+        while punctuation_end + 1 < chars.len()
+            && is_sentence_punctuation(chars[punctuation_end + 1].1)
+        {
+            punctuation_end += 1;
+        }
+
+        let punctuation_slice = &chars[punctuation_start..=punctuation_end];
+        let dot_count = punctuation_slice.iter().filter(|(_, c)| *c == '.').count();
+
+        let is_ellipsis = dot_count >= 3 || punctuation_slice.iter().any(|(_, c)| *c == '…');
+
+        // Keep quotes and closing brackets attached to their punctuation.
+        let mut after_closers = punctuation_end + 1;
+        while after_closers < chars.len() && is_closing_delimiter(chars[after_closers].1) {
+            after_closers += 1;
+        }
+
+        if after_closers < chars.len() && chars[after_closers].1.is_whitespace() {
+            let mut next = after_closers;
+
+            while next < chars.len() && chars[next].1.is_whitespace() {
+                next += 1;
+            }
+
+            if next < chars.len() {
+                let next_char = chars[next].1;
+                let has_closing_delimiter = after_closers > punctuation_end + 1;
+
+                let is_single_period = ch == '.' && punctuation_start == punctuation_end;
+
+                let is_abbreviation =
+                    is_single_period && abbreviation_continues(line, byte_offset, next_char);
+
+                // Ellipses are often hesitations, e.g. "Tôi nghĩ là...
+                // chúng ta nên đi." Likewise, lowercase text after a quoted
+                // question often continues the enclosing sentence:
+                // “Bạn khỏe không?” rồi rời đi.
+                let is_hesitation_continuation = is_ellipsis && next_char.is_lowercase();
+
+                let is_quoted_continuation = has_closing_delimiter && next_char.is_lowercase();
+
+                if !is_abbreviation && !is_hesitation_continuation && !is_quoted_continuation {
+                    let end_index = if has_closing_delimiter {
+                        after_closers - 1
+                    } else {
+                        punctuation_end
+                    };
+
+                    let end_byte = chars[end_index].0 + chars[end_index].1.len_utf8();
+
+                    let sentence = line[start_byte..end_byte].trim();
+
+                    if !sentence.is_empty() {
+                        output.push(sentence.to_string());
+                    }
+
+                    start_byte = chars[next].0;
+                    i = next;
+                    continue;
+                }
+            }
+        }
+
+        // Move beyond the punctuation sequence. Closing characters and
+        // whitespace can then be scanned normally if no split was made.
+        i = punctuation_end + 1;
+    }
+
+    let remaining = line[start_byte..].trim();
+
+    if !remaining.is_empty() {
+        output.push(remaining.to_string());
+    }
+}
+
+fn split_sentences_preserving_punctuation(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+
+    // Treat each explicit line as a logical speech unit. Blank lines are
+    // ignored, and Markdown heading/bullet prefixes are removed.
+    for raw_line in text.lines() {
+        let line = strip_spoken_line_prefix(raw_line);
+
+        if !line.is_empty() {
+            split_one_line_into_sentences(line, &mut chunks);
+        }
+    }
+
+    chunks
+}
+
+#[cfg(test)]
+mod sentence_split_tests {
+    use super::split_sentences_preserving_punctuation;
+
+    #[test]
+    fn splits_multiple_sentences_and_preserves_punctuation() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "Hôm nay bạn khỏe không? Anh mua em nhe. Ngày mai gặp nhé!"
+            ),
+            vec![
+                "Hôm nay bạn khỏe không?",
+                "Anh mua em nhe.",
+                "Ngày mai gặp nhé!"
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_commas_inside_sentences() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "Trời mưa rất lớn, nhưng tôi vẫn đi làm. Ngày mai nghỉ."
+            ),
+            vec!["Trời mưa rất lớn, nhưng tôi vẫn đi làm.", "Ngày mai nghỉ."]
+        );
+    }
+
+    #[test]
+    fn protects_decimals_thousands_and_dates() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "Giá là 3.14 triệu. Có 1.000.000 đồng. Ngày 29.09.2026 bắt đầu."
+            ),
+            vec![
+                "Giá là 3.14 triệu.",
+                "Có 1.000.000 đồng.",
+                "Ngày 29.09.2026 bắt đầu."
+            ]
+        );
+    }
+
+    #[test]
+    fn protects_vietnamese_abbreviations_and_titles() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "Tôi sống ở TP. Hồ Chí Minh. Tôi gặp PGS. TS. Nguyễn hôm nay."
+            ),
+            vec![
+                "Tôi sống ở TP. Hồ Chí Minh.",
+                "Tôi gặp PGS. TS. Nguyễn hôm nay."
+            ]
+        );
+
+        assert_eq!(
+            split_sentences_preserving_punctuation("Tôi ở Q. 1, TP. Hồ Chí Minh. Ngày mai đi."),
+            vec!["Tôi ở Q. 1, TP. Hồ Chí Minh.", "Ngày mai đi."]
+        );
+    }
+
+    #[test]
+    fn protects_english_titles_and_contextual_abbreviations() {
+        assert_eq!(
+            split_sentences_preserving_punctuation("Dr. Smith arrived. Then we left."),
+            vec!["Dr. Smith arrived.", "Then we left."]
+        );
+
+        assert_eq!(
+            split_sentences_preserving_punctuation("Có vài ví dụ e.g. trường hợp này. Sau đó về."),
+            vec!["Có vài ví dụ e.g. trường hợp này.", "Sau đó về."]
+        );
+
+        assert_eq!(
+            split_sentences_preserving_punctuation("Có vài thứ, v.v. Sau đó về."),
+            vec!["Có vài thứ, v.v.", "Sau đó về."]
+        );
+    }
+
+    #[test]
+    fn preserves_quotes_and_quoted_continuations() {
+        assert_eq!(
+            split_sentences_preserving_punctuation("He asked, \"really?\" Then left."),
+            vec!["He asked, \"really?\"", "Then left."]
+        );
+
+        assert_eq!(
+            split_sentences_preserving_punctuation("Anh ấy hỏi: “Bạn khỏe không?” rồi rời đi."),
+            vec!["Anh ấy hỏi: “Bạn khỏe không?” rồi rời đi."]
+        );
+
+        assert_eq!(
+            split_sentences_preserving_punctuation("Anh hỏi: “Bạn khỏe không?” Sau đó anh đi."),
+            vec!["Anh hỏi: “Bạn khỏe không?”", "Sau đó anh đi."]
+        );
+    }
+
+    #[test]
+    fn handles_parentheses() {
+        assert_eq!(
+            split_sentences_preserving_punctuation("(Bạn khỏe không?) rồi đi."),
+            vec!["(Bạn khỏe không?) rồi đi."]
+        );
+
+        assert_eq!(
+            split_sentences_preserving_punctuation("(Bạn khỏe không?) Sau đó đi."),
+            vec!["(Bạn khỏe không?)", "Sau đó đi."]
+        );
+    }
+
+    #[test]
+    fn handles_ellipses_and_repeated_punctuation() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "Tôi nghĩ là... chúng ta nên đi. Thật sao?! Anh không biết!!!"
+            ),
+            vec![
+                "Tôi nghĩ là... chúng ta nên đi.",
+                "Thật sao?!",
+                "Anh không biết!!!"
+            ]
+        );
+    }
+
+    #[test]
+    fn does_not_split_inside_urls_or_email_addresses() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "Truy cập example.com hoặc gửi mail a.b@example.com. Sau đó về."
+            ),
+            vec![
+                "Truy cập example.com hoặc gửi mail a.b@example.com.",
+                "Sau đó về."
+            ]
+        );
+    }
+
+    #[test]
+    fn removes_markdown_heading_and_bullet_prefixes() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "# Ghi chú\n\n• Mở ứng dụng\n- Nhấn nút phát\n* Kết thúc."
+            ),
+            vec!["Ghi chú", "Mở ứng dụng", "Nhấn nút phát", "Kết thúc."]
+        );
+    }
+
+    #[test]
+    fn handles_empty_whitespace_and_unpunctuated_lines() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(""),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            split_sentences_preserving_punctuation("   \n \n  "),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            split_sentences_preserving_punctuation("Xin chào\nHẹn gặp lại"),
+            vec!["Xin chào", "Hẹn gặp lại"]
+        );
+    }
+
+    #[test]
+    fn leaves_a_single_sentence_unchanged() {
+        assert_eq!(
+            split_sentences_preserving_punctuation("Hôm nay bạn khỏe không?"),
+            vec!["Hôm nay bạn khỏe không?"]
+        );
+    }
+}
+
 impl VieNeuEngine {
     pub fn set_cache_directory(&mut self, directory: impl AsRef<Path>) -> Result<(), EngineError> {
         let directory = directory.as_ref();
@@ -264,10 +633,7 @@ impl VieNeuEngine {
             Some(path) => {
                 #[cfg(not(target_os = "ios"))]
                 {
-                    eprintln!(
-                        "VieNeu Rust: using explicit ORT path = {}",
-                        path.display()
-                    );
+                    eprintln!("VieNeu Rust: using explicit ORT path = {}", path.display());
                     Self::preload_onnxruntime_from_path(path)?;
                 }
 
@@ -612,23 +978,93 @@ impl VieNeuEngine {
             });
         }
 
-        // -----------------------------------------------------
-        // G2P
-        // -----------------------------------------------------
+        // Split into sentences and synthesize each sentence independently.
+        // The existing cache still stores the final combined result by full text.
+        let chunks = split_sentences_preserving_punctuation(text);
 
-        let phonemes = self.g2p.phonemize(text);
-
-        if phonemes.trim().is_empty() {
-            return Err(EngineError::Generation(
-                "G2P produced an empty phoneme string".to_string(),
-            ));
+        if chunks.is_empty() {
+            return Err(EngineError::Generation("Input text is empty".to_string()));
         }
 
-        // -----------------------------------------------------
-        // VieNeu synthesis
-        // -----------------------------------------------------
+        let result = if chunks.len() == 1 {
+            // Preserve the original path for single-sentence input.
+            let phonemes = self.g2p.phonemize(&chunks[0]);
 
-        let result = self.synthesize_phonemes(&phonemes, voice_id, Some(&config))?;
+            if phonemes.trim().is_empty() {
+                return Err(EngineError::Generation(
+                    "G2P produced an empty phoneme string".to_string(),
+                ));
+            }
+
+            self.synthesize_phonemes(&phonemes, voice_id, Some(&config))?
+        } else {
+            const SENTENCE_PAUSE_MS: u64 = 350;
+
+            let mut combined_samples: Vec<f32> = Vec::new();
+            let mut combined_sample_rate: Option<u32> = None;
+            let mut total_frames = 0usize;
+            let mut all_reached_eos = true;
+
+            for (index, chunk_text) in chunks.iter().enumerate() {
+                eprintln!(
+                    "VieNeu: synthesizing sentence {}/{}: {}",
+                    index + 1,
+                    chunks.len(),
+                    chunk_text
+                );
+
+                let phonemes = self.g2p.phonemize(chunk_text);
+
+                if phonemes.trim().is_empty() {
+                    return Err(EngineError::Generation(format!(
+                        "G2P produced empty phonemes for sentence: {chunk_text}"
+                    )));
+                }
+
+                let chunk_result = self.synthesize_phonemes(&phonemes, voice_id, Some(&config))?;
+
+                if let Some(previous_rate) = combined_sample_rate {
+                    if previous_rate != chunk_result.sample_rate {
+                        return Err(EngineError::Generation(
+                            "Sentence audio sample rates do not match".to_string(),
+                        ));
+                    }
+                } else {
+                    combined_sample_rate = Some(chunk_result.sample_rate);
+                }
+
+                total_frames += chunk_result.frames_generated;
+                all_reached_eos &= chunk_result.eos_reached;
+
+                // Remove excess silence at the edges of each chunk before
+                // inserting our own controlled sentence-boundary pause.
+                let trimmed_samples = crate::wav::trim_silence_samples(
+                    &chunk_result.samples,
+                    chunk_result.sample_rate,
+                );
+
+                combined_samples.extend_from_slice(&trimmed_samples);
+
+                if index + 1 < chunks.len() {
+                    let pause_samples =
+                        (chunk_result.sample_rate as u64 * SENTENCE_PAUSE_MS / 1000) as usize;
+
+                    combined_samples.extend(std::iter::repeat(0.0_f32).take(pause_samples));
+                }
+            }
+
+            let sample_rate = combined_sample_rate.ok_or_else(|| {
+                EngineError::Generation("No sentence audio was generated".to_string())
+            })?;
+
+            SynthesisResult {
+                samples: combined_samples,
+                sample_rate,
+                frames_generated: total_frames,
+                eos_reached: all_reached_eos,
+                cache_hit: false,
+            }
+        };
 
         if result.eos_reached {
             if let Some(cache) = &self.cache {

@@ -31,6 +31,10 @@ fn trim_silence(samples: &[f32], sample_rate: u32) -> &[f32] {
     &samples[start..end]
 }
 
+pub fn trim_silence_samples(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    trim_silence(samples, sample_rate).to_vec()
+}
+
 pub fn write_wav_mono_f32(
     path: impl AsRef<Path>,
     samples: &[f32],
