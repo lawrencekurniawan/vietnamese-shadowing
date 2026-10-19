@@ -199,6 +199,33 @@ pub extern "C" fn vieneu_tts_create(
     Box::into_raw(Box::new(VieNeuTtsNativeEngine { engine }))
 }
 
+/// Return normalized speech text without initializing the TTS model.
+/// The returned string must be released with vieneu_free_string().
+#[unsafe(no_mangle)]
+pub extern "C" fn vieneu_tts_preview_text(text: *const c_char) -> *mut c_char {
+    clear_last_error();
+    if text.is_null() {
+        set_last_error("text is null");
+        return std::ptr::null_mut();
+    }
+    let text = unsafe { CStr::from_ptr(text) };
+    let text = match text.to_str() {
+        Ok(value) => value,
+        Err(_) => {
+            set_last_error("text is not valid UTF-8");
+            return std::ptr::null_mut();
+        }
+    };
+    let normalized = crate::engine::normalize_text_for_speech(text);
+    match CString::new(normalized) {
+        Ok(value) => value.into_raw(),
+        Err(error) => {
+            set_last_error(format!("Could not create preview text: {error}"));
+            std::ptr::null_mut()
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn vieneu_tts_last_error() -> *mut c_char {
     let mutex = LAST_ERROR.get_or_init(|| Mutex::new(None));

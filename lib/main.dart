@@ -76,6 +76,7 @@ class _HomePageState extends State<HomePage> {
   String _status = 'Starting...';
 
   String? _generatedWavPath;
+  String? _previewedSpeechText;
 
   bool _isInitializing = true;
   bool _isGenerating = false;
@@ -364,6 +365,32 @@ class _HomePageState extends State<HomePage> {
           _isGenerating = false;
         });
       }
+    }
+  }
+
+  void _previewSpeechText() {
+    final text = _textController.text.trim();
+    if (text.isEmpty) {
+      setState(() {
+        _previewedSpeechText = null;
+        _status = 'Please enter some text to preview.';
+      });
+      return;
+    }
+
+    try {
+      final normalized = _tts.previewSpeechText(text);
+      if (!mounted) return;
+      setState(() {
+        _previewedSpeechText = normalized;
+        _status = 'Speech text preview ready.';
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _previewedSpeechText = null;
+        _status = 'Speech text preview failed: $error';
+      });
     }
   }
 
@@ -824,10 +851,11 @@ class _HomePageState extends State<HomePage> {
                           maxLines: 6,
                           textInputAction: TextInputAction.newline,
                           onChanged: (_) {
-                            if (_generatedWavPath != null) {
+                            if (_generatedWavPath != null || _previewedSpeechText != null) {
                               setState(() {
                                 _generatedWavPath = null;
-                                _status = 'Text changed — generate new audio.';
+                                _previewedSpeechText = null;
+                                _status = 'Text changed — preview and generate again.';
                               });
                             }
                           },
@@ -845,6 +873,33 @@ class _HomePageState extends State<HomePage> {
 
                 const SizedBox(height: 12),
 
+                OutlinedButton.icon(
+                  onPressed: !engineReady || _isGenerating
+                      ? null
+                      : _previewSpeechText,
+                  icon: const Icon(Icons.visibility_outlined),
+                  label: const Text('Preview speech text'),
+                ),
+                if (_previewedSpeechText != null) ...[
+                  const SizedBox(height: 8),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Text that will be spoken',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                          const SizedBox(height: 6),
+                          SelectableText(_previewedSpeechText!),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
                 // Action buttons
                 Wrap(
                   alignment: WrapAlignment.start,

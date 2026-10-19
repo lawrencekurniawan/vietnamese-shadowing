@@ -417,6 +417,7 @@
 					"-Wl,-u,_vieneu_tts_clear_cached_text",
 					"-Wl,-u,_vieneu_free_string",
 				"-Wl,-u,_vieneu_tts_last_error",
+					"-Wl,-u,_vieneu_tts_preview_text",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.vietnameseShadowing;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -614,6 +615,7 @@
 					"-Wl,-u,_vieneu_tts_clear_cached_text",
 					"-Wl,-u,_vieneu_free_string",
 				"-Wl,-u,_vieneu_tts_last_error",
+					"-Wl,-u,_vieneu_tts_preview_text",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.vietnameseShadowing;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -651,6 +653,7 @@
 					"-Wl,-u,_vieneu_tts_clear_cached_text",
 					"-Wl,-u,_vieneu_free_string",
 				"-Wl,-u,_vieneu_tts_last_error",
+					"-Wl,-u,_vieneu_tts_preview_text",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.vietnameseShadowing;
 				PRODUCT_NAME = "$(TARGET_NAME)";

@@ -64,6 +64,8 @@ typedef _TtsClearCachedTextDart = int Function(
 
 typedef _TtsLastErrorNative = Pointer<Utf8> Function();
 typedef _TtsLastErrorDart = Pointer<Utf8> Function();
+typedef _TtsPreviewTextNative = Pointer<Utf8> Function(Pointer<Utf8> text);
+typedef _TtsPreviewTextDart = Pointer<Utf8> Function(Pointer<Utf8> text);
 
 class VietnameseVoice {
   final String id;
@@ -104,6 +106,7 @@ class VieNeuFfi {
   late final _FreeStringDart _freeString;
   late final _TtsClearCachedTextDart _clearCachedText;
   late final _TtsLastErrorDart _lastError;
+  late final _TtsPreviewTextDart _previewText;
 
   Pointer<_NativeTtsEngine>? _engine;
 
@@ -145,6 +148,11 @@ class VieNeuFfi {
     _lastError = _library
         .lookupFunction<_TtsLastErrorNative, _TtsLastErrorDart>(
           'vieneu_tts_last_error',
+        );
+
+    _previewText = _library
+        .lookupFunction<_TtsPreviewTextNative, _TtsPreviewTextDart>(
+          'vieneu_tts_preview_text',
         );
   }
 
@@ -276,6 +284,30 @@ class VieNeuFfi {
           .toList();
     } finally {
       _freeString(ptr);
+    }
+  }
+
+  /// Return the Vietnamese text that the TTS engine will receive.
+  String previewSpeechText(String text) {
+    final textPtr = text.toNativeUtf8();
+    try {
+      final result = _previewText(textPtr);
+      if (result == nullptr) {
+        final errorPtr = _lastError();
+        var message = 'vieneu_tts_preview_text() failed.';
+        if (errorPtr != nullptr) {
+          message = errorPtr.toDartString();
+          _freeString(errorPtr);
+        }
+        throw StateError(message);
+      }
+      try {
+        return result.toDartString();
+      } finally {
+        _freeString(result);
+      }
+    } finally {
+      malloc.free(textPtr);
     }
   }
 

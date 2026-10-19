@@ -1344,6 +1344,7 @@ dependencies = [
  "chrono",
  "ndarray",
  "ort",
+ "regex",
  "sea-g2p-rs",
  "serde",
  "serde_json",

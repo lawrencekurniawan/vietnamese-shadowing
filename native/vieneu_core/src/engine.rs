@@ -484,6 +484,372 @@ mod sentence_split_tests {
     }
 }
 
+fn replace_binary_expression(
+    input: &str,
+    expression: &regex::Regex,
+    operator_word: &str,
+) -> String {
+    use regex::Captures;
+
+    expression
+        .replace_all(input, |captures: &Captures<'_>| {
+            let left = captures.name("a").expect("left operand").as_str();
+            let right = captures.name("b").expect("right operand").as_str();
+            match captures.name("result") {
+                Some(result) => format!("{left} {operator_word} {right} bằng {}", result.as_str()),
+                None => format!("{left} {operator_word} {right}"),
+            }
+        })
+        .into_owned()
+}
+
+/// Convert numeric and mathematical notation to the Vietnamese text that is
+/// passed to G2P. This function does not synthesize audio or load model files.
+pub fn normalize_text_for_speech(text: &str) -> String {
+    let chunks = split_sentences_preserving_punctuation(text);
+    chunks
+        .iter()
+        .map(|chunk| normalize_speech_chunk(chunk))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_speech_chunk(text: &str) -> String {
+    use regex::{Captures, Regex};
+    use std::sync::OnceLock;
+
+    static PROTECTED_RE: OnceLock<Regex> = OnceLock::new();
+    static K_SHORTHAND_RE: OnceLock<Regex> = OnceLock::new();
+    static VND_RE: OnceLock<Regex> = OnceLock::new();
+    static DECIMAL_DOT_RE: OnceLock<Regex> = OnceLock::new();
+    static POWER_RE: OnceLock<Regex> = OnceLock::new();
+    static SUPERSCRIPT_RE: OnceLock<Regex> = OnceLock::new();
+    static SQRT_SYMBOL_RE: OnceLock<Regex> = OnceLock::new();
+    static CBRT_SYMBOL_RE: OnceLock<Regex> = OnceLock::new();
+    static SQRT_WORD_RE: OnceLock<Regex> = OnceLock::new();
+    static CBRT_WORD_RE: OnceLock<Regex> = OnceLock::new();
+    static ADDITION_RE: OnceLock<Regex> = OnceLock::new();
+    static SUBTRACTION_EQUATION_RE: OnceLock<Regex> = OnceLock::new();
+    static SUBTRACTION_SPACED_RE: OnceLock<Regex> = OnceLock::new();
+    static MULTIPLICATION_RE: OnceLock<Regex> = OnceLock::new();
+    static X_MULTIPLICATION_RE: OnceLock<Regex> = OnceLock::new();
+    static DIVISION_EQUATION_RE: OnceLock<Regex> = OnceLock::new();
+    static DIVISION_SYMBOL_RE: OnceLock<Regex> = OnceLock::new();
+    static DIVISION_SPACED_RE: OnceLock<Regex> = OnceLock::new();
+    static FRACTION_RE: OnceLock<Regex> = OnceLock::new();
+    static MULTIPLIER_RE: OnceLock<Regex> = OnceLock::new();
+
+    // Protect dates, URLs and emails from arithmetic/fraction rewrites. They
+    // are restored before SEA-G2P applies its Vietnamese normalizer.
+    let mut protected_values: Vec<String> = Vec::new();
+    let mut prepared = PROTECTED_RE
+        .get_or_init(|| {
+            Regex::new(
+                r"(?i)(?:https?://|www\.)[^\s]+|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b",
+            )
+            .expect("valid protected-token regex")
+        })
+        .replace_all(text, |captures: &Captures<'_>| {
+            let value = captures.get(0).expect("protected value").as_str();
+            let index = protected_values.len();
+            protected_values.push(value.to_owned());
+            format!("ZXQPROTECTEDVALUE{index}QXZ")
+        })
+        .into_owned();
+
+    // Currency shorthand: 20k VND -> 20 ngàn đồng; 100k -> 100 ngàn.
+    prepared = K_SHORTHAND_RE
+        .get_or_init(|| {
+            Regex::new(r"(?i)(?P<amount>\d+)\s*k(?:\s*(?P<unit>vnd|đồng|đ))?\b")
+                .expect("valid currency shorthand regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            let amount = captures.name("amount").expect("amount").as_str();
+            if captures.name("unit").is_some() {
+                format!("{amount} ngàn đồng")
+            } else {
+                format!("{amount} ngàn")
+            }
+        })
+        .into_owned();
+
+    prepared = VND_RE
+        .get_or_init(|| Regex::new(r"(?i)\bvnd\b").expect("valid VND regex"))
+        .replace_all(&prepared, "đồng")
+        .into_owned();
+
+    // Accept both 3.14 and 3,14. Preserve common thousands forms such as
+    // 20.000; the ambiguous 1.234 is treated as a decimal.
+    prepared = DECIMAL_DOT_RE
+        .get_or_init(|| Regex::new(r"\b\d+\.\d+\b").expect("valid decimal regex"))
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            let token = captures.get(0).expect("number token").as_str();
+            let (whole, fraction) = token.split_once('.').expect("decimal separator");
+            let likely_thousands = fraction.len() == 3 && (whole.len() >= 2 || fraction == "000");
+            if likely_thousands {
+                token.to_owned()
+            } else {
+                format!("{whole},{fraction}")
+            }
+        })
+        .into_owned();
+
+    // Powers: 3^2 and 3² -> bình phương; 3^3 and 3³ -> lập phương.
+    prepared = POWER_RE
+        .get_or_init(|| {
+            Regex::new(r"(?P<base>\d+)\s*(?:\*\*|\^)\s*(?P<exponent>\d+)")
+                .expect("valid power regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            let base = captures.name("base").expect("base").as_str();
+            let exponent = captures.name("exponent").expect("exponent").as_str();
+            match exponent {
+                "2" => format!("{base} bình phương"),
+                "3" => format!("{base} lập phương"),
+                _ => format!("{base} mũ {exponent}"),
+            }
+        })
+        .into_owned();
+
+    prepared = SUPERSCRIPT_RE
+        .get_or_init(|| {
+            Regex::new(r"(?P<base>\d+)(?P<exponent>[²³])").expect("valid superscript regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            let base = captures.name("base").expect("base").as_str();
+            match captures.name("exponent").expect("exponent").as_str() {
+                "²" => format!("{base} bình phương"),
+                "³" => format!("{base} lập phương"),
+                _ => unreachable!("only square and cube superscripts match"),
+            }
+        })
+        .into_owned();
+
+    // Square and cube roots: √9, ∛27, sqrt(9), cbrt(27).
+    prepared = SQRT_SYMBOL_RE
+        .get_or_init(|| {
+            Regex::new(r"√\s*\(?\s*(?P<number>\d+(?:[,.]\d+)?)\s*\)?")
+                .expect("valid square-root regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            format!(
+                "căn bậc hai của {}",
+                captures.name("number").expect("number").as_str()
+            )
+        })
+        .into_owned();
+    prepared = CBRT_SYMBOL_RE
+        .get_or_init(|| {
+            Regex::new(r"∛\s*\(?\s*(?P<number>\d+(?:[,.]\d+)?)\s*\)?")
+                .expect("valid cube-root regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            format!(
+                "căn bậc ba của {}",
+                captures.name("number").expect("number").as_str()
+            )
+        })
+        .into_owned();
+    prepared = SQRT_WORD_RE
+        .get_or_init(|| {
+            Regex::new(r"(?i)\bsqrt\s*\(?\s*(?P<number>\d+(?:[,.]\d+)?)\s*\)?")
+                .expect("valid sqrt regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            format!(
+                "căn bậc hai của {}",
+                captures.name("number").expect("number").as_str()
+            )
+        })
+        .into_owned();
+    prepared = CBRT_WORD_RE
+        .get_or_init(|| {
+            Regex::new(r"(?i)\bcbrt\s*\(?\s*(?P<number>\d+(?:[,.]\d+)?)\s*\)?")
+                .expect("valid cbrt regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            format!(
+                "căn bậc ba của {}",
+                captures.name("number").expect("number").as_str()
+            )
+        })
+        .into_owned();
+
+    let number = r"\d+(?:[,.]\d+)?";
+    prepared = replace_binary_expression(
+        &prepared,
+        ADDITION_RE.get_or_init(|| {
+            Regex::new(&format!(
+                r"(?P<a>{number})\s*\+\s*(?P<b>{number})(?:\s*=\s*(?P<result>{number}))?"
+            ))
+            .unwrap()
+        }),
+        "cộng",
+    );
+    prepared = replace_binary_expression(
+        &prepared,
+        SUBTRACTION_EQUATION_RE.get_or_init(|| {
+            Regex::new(&format!(
+                r"(?P<a>{number})\s*[-−]\s*(?P<b>{number})\s*=\s*(?P<result>{number})"
+            ))
+            .unwrap()
+        }),
+        "trừ",
+    );
+    prepared = replace_binary_expression(
+        &prepared,
+        SUBTRACTION_SPACED_RE.get_or_init(|| {
+            Regex::new(&format!(r"(?P<a>{number})\s+[-−]\s+(?P<b>{number})")).unwrap()
+        }),
+        "trừ",
+    );
+    prepared = replace_binary_expression(
+        &prepared,
+        MULTIPLICATION_RE.get_or_init(|| {
+            Regex::new(&format!(
+                r"(?P<a>{number})\s*(?:\*|×|·)\s*(?P<b>{number})(?:\s*=\s*(?P<result>{number}))?"
+            ))
+            .unwrap()
+        }),
+        "nhân",
+    );
+    prepared = replace_binary_expression(
+        &prepared,
+        X_MULTIPLICATION_RE.get_or_init(|| {
+            Regex::new(&format!(
+                r"(?P<a>{number})\s*[xX]\s*(?P<b>{number})(?:\s*=\s*(?P<result>{number}))?"
+            ))
+            .unwrap()
+        }),
+        "nhân",
+    );
+    prepared = replace_binary_expression(
+        &prepared,
+        DIVISION_EQUATION_RE.get_or_init(|| {
+            Regex::new(&format!(
+                r"(?P<a>{number})\s*(?:/|÷)\s*(?P<b>{number})\s*=\s*(?P<result>{number})"
+            ))
+            .unwrap()
+        }),
+        "chia",
+    );
+    prepared = replace_binary_expression(
+        &prepared,
+        DIVISION_SYMBOL_RE.get_or_init(|| {
+            Regex::new(&format!(
+                r"(?P<a>{number})\s*÷\s*(?P<b>{number})(?:\s*=\s*(?P<result>{number}))?"
+            ))
+            .unwrap()
+        }),
+        "chia",
+    );
+    prepared = replace_binary_expression(
+        &prepared,
+        DIVISION_SPACED_RE.get_or_init(|| {
+            Regex::new(&format!(r"(?P<a>{number})\s+/\s+(?P<b>{number})")).unwrap()
+        }),
+        "chia",
+    );
+
+    // A compact unspaced slash is a fraction: 1/2 -> một nửa, 2/10 -> hai
+    // phần mười. Multi-part dates and division equations were protected/handled above.
+    prepared = FRACTION_RE
+        .get_or_init(|| {
+            Regex::new(r"\b(?P<numerator>\d+)/(?P<denominator>\d+)\b")
+                .expect("valid fraction regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            let numerator = captures.name("numerator").expect("numerator").as_str();
+            let denominator = captures.name("denominator").expect("denominator").as_str();
+            if numerator == "1" && denominator == "2" {
+                return "một nửa".to_owned();
+            }
+            let denominator = if denominator == "4" {
+                "tư"
+            } else {
+                denominator
+            };
+            format!("{numerator} phần {denominator}")
+        })
+        .into_owned();
+
+    // A numeric suffix such as 2x means a multiplier; 3 x 4 was handled above.
+    prepared = MULTIPLIER_RE
+        .get_or_init(|| {
+            Regex::new(r"(?P<count>\d+(?:[,.]\d+)?)x\b").expect("valid multiplier regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            let count = captures.name("count").expect("count").as_str();
+            if count == "2" {
+                "gấp đôi".to_owned()
+            } else {
+                format!("gấp {count} lần")
+            }
+        })
+        .into_owned();
+
+    for (index, original) in protected_values.iter().enumerate() {
+        prepared = prepared.replace(&format!("ZXQPROTECTEDVALUE{index}QXZ"), original);
+    }
+
+    let normalized = sea_g2p_rs::lang::vi::clean_vietnamese_text_ctx(&prepared, true);
+    normalized.replace("nghìn", "ngàn")
+}
+
+#[cfg(test)]
+mod speech_normalization_tests {
+    use super::normalize_text_for_speech;
+
+    #[test]
+    fn normalizes_dates_currency_decimals_and_math() {
+        assert!(
+            normalize_text_for_speech("20-08-2000")
+                .contains("ngày hai mươi tháng tám năm hai ngàn")
+        );
+        assert_eq!(normalize_text_for_speech("20k VND"), "hai mươi ngàn đồng");
+        assert_eq!(normalize_text_for_speech("100k"), "một trăm ngàn");
+        assert_eq!(normalize_text_for_speech("3.14"), "ba phẩy một bốn");
+        assert_eq!(normalize_text_for_speech("3,14"), "ba phẩy một bốn");
+        assert_eq!(
+            normalize_text_for_speech("12.5%"),
+            "mười hai phẩy năm phần trăm"
+        );
+        assert_eq!(
+            normalize_text_for_speech("2 + 3 = 5"),
+            "hai cộng ba bằng năm"
+        );
+        assert_eq!(
+            normalize_text_for_speech("5 - 2 = 3"),
+            "năm trừ hai bằng ba"
+        );
+        assert_eq!(
+            normalize_text_for_speech("3 x 4 = 12"),
+            "ba nhân bốn bằng mười hai"
+        );
+        assert_eq!(
+            normalize_text_for_speech("10 / 2 = 5"),
+            "mười chia hai bằng năm"
+        );
+    }
+
+    #[test]
+    fn normalizes_fractions_multipliers_powers_and_roots() {
+        assert_eq!(normalize_text_for_speech("1/2"), "một nửa");
+        assert_eq!(normalize_text_for_speech("1/3"), "một phần ba");
+        assert_eq!(normalize_text_for_speech("2/10"), "hai phần mười");
+        assert_eq!(normalize_text_for_speech("3/4"), "ba phần tư");
+        assert_eq!(normalize_text_for_speech("2x"), "gấp đôi");
+        assert_eq!(normalize_text_for_speech("3x"), "gấp ba lần");
+        assert_eq!(normalize_text_for_speech("3²"), "ba bình phương");
+        assert_eq!(normalize_text_for_speech("3^2"), "ba bình phương");
+        assert_eq!(normalize_text_for_speech("√9"), "căn bậc hai của chín");
+        assert_eq!(
+            normalize_text_for_speech("∛27"),
+            "căn bậc ba của hai mươi bảy"
+        );
+    }
+}
+
 impl VieNeuEngine {
     pub fn set_cache_directory(&mut self, directory: impl AsRef<Path>) -> Result<(), EngineError> {
         let directory = directory.as_ref();
@@ -988,7 +1354,8 @@ impl VieNeuEngine {
 
         let result = if chunks.len() == 1 {
             // Preserve the original path for single-sentence input.
-            let phonemes = self.g2p.phonemize(&chunks[0]);
+            let normalized_text = normalize_speech_chunk(&chunks[0]);
+            let phonemes = self.g2p.phonemize(&normalized_text);
 
             if phonemes.trim().is_empty() {
                 return Err(EngineError::Generation(
@@ -1013,7 +1380,8 @@ impl VieNeuEngine {
                     chunk_text
                 );
 
-                let phonemes = self.g2p.phonemize(chunk_text);
+                let normalized_text = normalize_speech_chunk(chunk_text);
+                let phonemes = self.g2p.phonemize(&normalized_text);
 
                 if phonemes.trim().is_empty() {
                     return Err(EngineError::Generation(format!(
