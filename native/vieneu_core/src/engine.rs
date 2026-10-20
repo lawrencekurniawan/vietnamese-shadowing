@@ -144,6 +144,24 @@ fn strip_spoken_line_prefix(line: &str) -> &str {
         }
     }
 
+    // Remove line-leading numbered-list markers such as "1. " or "2) ".
+    // Limit the marker to 1-3 digits and require following whitespace so
+    // decimals, dotted dates, and larger numbers are not mistaken for lists.
+    let digits = line.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if (1..=3).contains(&digits) {
+        let rest = &line[digits..];
+        if let Some(rest) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')')) {
+            if rest
+                .chars()
+                .next()
+                .map(char::is_whitespace)
+                .unwrap_or(false)
+            {
+                line = rest.trim_start();
+            }
+        }
+    }
+
     line.trim()
 }
 
@@ -460,6 +478,40 @@ mod sentence_split_tests {
     }
 
     #[test]
+    fn removes_numbered_list_prefixes() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "1. Mở ứng dụng\n2) Đóng ứng dụng\n10. Mục thứ mười"
+            ),
+            vec!["Mở ứng dụng", "Đóng ứng dụng", "Mục thứ mười"]
+        );
+    }
+
+    #[test]
+    fn does_not_treat_numeric_text_as_numbered_lists() {
+        assert_eq!(
+            split_sentences_preserving_punctuation(
+                "3.14 là số pi\n29.09.2026 bắt đầu\n1.000.000 đồng\n2025. Sự kiện"
+            ),
+            vec![
+                "3.14 là số pi",
+                "29.09.2026 bắt đầu",
+                "1.000.000 đồng",
+                "2025.",
+                "Sự kiện"
+            ]
+        );
+    }
+
+    #[test]
+    fn preserves_ordinary_punctuation_after_numbered_prefixes() {
+        assert_eq!(
+            split_sentences_preserving_punctuation("1. Mở ứng dụng. Nhấn nút phát."),
+            vec!["Mở ứng dụng.", "Nhấn nút phát."]
+        );
+    }
+
+    #[test]
     fn handles_empty_whitespace_and_unpunctuated_lines() {
         assert_eq!(
             split_sentences_preserving_punctuation(""),
@@ -482,6 +534,36 @@ mod sentence_split_tests {
             vec!["Hôm nay bạn khỏe không?"]
         );
     }
+}
+
+fn replace_spaced_subtraction(input: &str, expression: &regex::Regex) -> String {
+    use regex::Captures;
+
+    expression
+        .replace_all(input, |captures: &Captures<'_>| {
+            let whole = captures.get(0).expect("subtraction expression");
+            if has_range_prefix(input, whole.start()) {
+                return whole.as_str().to_owned();
+            }
+
+            let left = captures.name("a").expect("left operand").as_str();
+            let right = captures.name("b").expect("right operand").as_str();
+            format!("{left} trừ {right}")
+        })
+        .into_owned()
+}
+
+/// `trang 5 - 7` is a range, not subtraction. Leave its dash for sea-g2p's
+/// range pass; ordinary `10 - 3` has no such prefix and is still subtraction.
+fn has_range_prefix(text: &str, match_start: usize) -> bool {
+    let word = text[..match_start]
+        .split_whitespace()
+        .next_back()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+
+    word == "trang"
 }
 
 fn replace_binary_expression(
@@ -519,6 +601,7 @@ fn normalize_speech_chunk(text: &str) -> String {
     use std::sync::OnceLock;
 
     static PROTECTED_RE: OnceLock<Regex> = OnceLock::new();
+    static PARTIAL_DATE_RE: OnceLock<Regex> = OnceLock::new();
     static K_SHORTHAND_RE: OnceLock<Regex> = OnceLock::new();
     static VND_RE: OnceLock<Regex> = OnceLock::new();
     static DECIMAL_DOT_RE: OnceLock<Regex> = OnceLock::new();
@@ -551,6 +634,25 @@ fn normalize_speech_chunk(text: &str) -> String {
         })
         .replace_all(text, |captures: &Captures<'_>| {
             let value = captures.get(0).expect("protected value").as_str();
+            let index = protected_values.len();
+            protected_values.push(value.to_owned());
+            format!("ZXQPROTECTEDVALUE{index}QXZ")
+        })
+        .into_owned();
+
+    // Partial dates (`ngày 20/11`, `quý 1/2025`, `từ 1/8 đến 31/8`) are dates,
+    // not fractions. Full dates are already protected above; keep these
+    // context-anchored forms away from FRACTION_RE so sea-g2p's date pass sees
+    // the original slash text.
+    prepared = PARTIAL_DATE_RE
+        .get_or_init(|| {
+            Regex::new(
+                r"(?i)\b(?:quý\s+(?:\d{1,2}|IV|III|II|I)\s*/\s*\d{4}|(?:từ|ngày|hôm)\s+\d{1,2}/\d{1,2}\s*(?:đến hết|đến|tới|-|–)\s*\d{1,2}/\d{1,2}|(?:ngày|hôm|vào)\s+\d{1,2}/\d{1,2})\b",
+            )
+            .expect("valid partial-date regex")
+        })
+        .replace_all(&prepared, |captures: &Captures<'_>| {
+            let value = captures.get(0).expect("partial date").as_str();
             let index = protected_values.len();
             protected_values.push(value.to_owned());
             format!("ZXQPROTECTEDVALUE{index}QXZ")
@@ -696,12 +798,11 @@ fn normalize_speech_chunk(text: &str) -> String {
         }),
         "trừ",
     );
-    prepared = replace_binary_expression(
+    prepared = replace_spaced_subtraction(
         &prepared,
         SUBTRACTION_SPACED_RE.get_or_init(|| {
             Regex::new(&format!(r"(?P<a>{number})\s+[-−]\s+(?P<b>{number})")).unwrap()
         }),
-        "trừ",
     );
     prepared = replace_binary_expression(
         &prepared,
@@ -847,6 +948,85 @@ mod speech_normalization_tests {
             normalize_text_for_speech("∛27"),
             "căn bậc ba của hai mươi bảy"
         );
+    }
+
+    #[test]
+    fn normalizes_day_month_without_year() {
+        assert_eq!(
+            normalize_text_for_speech("ngày 20/11"),
+            "ngày hai mươi tháng mười một"
+        );
+    }
+
+    #[test]
+    fn normalizes_quarter_and_year() {
+        assert_eq!(
+            normalize_text_for_speech("quý 1/2025"),
+            "quý một năm hai ngàn không trăm hai mươi lăm"
+        );
+    }
+
+    #[test]
+    fn normalizes_slash_date_range() {
+        assert_eq!(
+            normalize_text_for_speech("từ 1/8 đến 31/8"),
+            "từ ngày một tháng tám đến ngày ba mươi mốt tháng tám"
+        );
+    }
+
+    #[test]
+    fn normalizes_slash_date_range_with_repeated_ngay() {
+        assert_eq!(
+            normalize_text_for_speech("từ ngày 1/8 đến ngày 31/8"),
+            "từ ngày một tháng tám đến ngày ba mươi mốt tháng tám"
+        );
+    }
+
+    #[test]
+    fn normalizes_slash_date_range_with_end_marker() {
+        assert_eq!(
+            normalize_text_for_speech("từ 1/8 đến hết 31/8"),
+            "từ ngày một tháng tám đến hết ngày ba mươi mốt tháng tám"
+        );
+    }
+
+    #[test]
+    fn reads_spaced_numeric_range_as_range() {
+        assert_eq!(
+            normalize_text_for_speech("trang 5 - 7"),
+            "trang năm đến bảy"
+        );
+    }
+
+    #[test]
+    fn preserves_spaced_subtraction_without_range_prefix() {
+        assert_eq!(normalize_text_for_speech("10 - 3"), "mười trừ ba");
+        assert_eq!(
+            normalize_text_for_speech("10 - 3 = 7"),
+            "mười trừ ba bằng bảy"
+        );
+    }
+
+    #[test]
+    fn treats_numbered_list_marker_as_formatting() {
+        assert_eq!(normalize_text_for_speech("1. Mở ứng dụng"), "mở ứng dụng");
+    }
+
+    #[test]
+    fn normalizes_other_numbered_list_prefixes() {
+        assert_eq!(
+            normalize_text_for_speech("2. Đóng ứng dụng"),
+            "đóng ứng dụng"
+        );
+        assert_eq!(
+            normalize_text_for_speech("10) Mục thứ mười"),
+            "mục thứ mười"
+        );
+    }
+
+    #[test]
+    fn emoji_only_input_normalizes_to_empty_string() {
+        assert_eq!(normalize_text_for_speech("😀"), "");
     }
 }
 
