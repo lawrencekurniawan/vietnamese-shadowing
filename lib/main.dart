@@ -1,9 +1,9 @@
 import 'package:share_plus/share_plus.dart' as share_plus;
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/services.dart';
 
 import 'native/vieneu_asset_stager.dart';
 
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -15,6 +15,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import 'native/vieneu_ffi.dart';
+import 'playback/playback_session.dart';
 
 void main() {
   runApp(const VietnameseShadowingApp());
@@ -87,8 +88,7 @@ class _HomePageState extends State<HomePage> {
   double _paddingSeconds = 0.5;
   bool _pauseUsesAudioLength = false;
 
-  Process? _playbackProcess;
-  bool _stopPlaybackRequested = false;
+  PlaybackSession? _playbackSession;
 
   @override
   void initState() {
@@ -506,16 +506,24 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    _stopPlaybackRequested = false;
-
-    setState(() {
-      _isPlaying = true;
-      _status = 'Playing...';
-    });
-
-    final player = AudioPlayer();
+    PlaybackSession? session;
 
     try {
+      session = PlaybackSession(
+        wavPath: wavPath,
+        playbackSpeed: _playbackSpeed,
+        repeatCount: _repeatCount,
+        paddingSeconds: _paddingSeconds,
+        pauseUsesAudioLength: _pauseUsesAudioLength,
+        wavDurationReader: _getWavDurationSeconds,
+      );
+      _playbackSession = session;
+
+      setState(() {
+        _isPlaying = true;
+        _status = 'Playing...';
+      });
+
       print('VieNeu: playing $wavPath');
       print(
         'VieNeu: speed=${_playbackSpeed}x, '
@@ -523,47 +531,20 @@ class _HomePageState extends State<HomePage> {
         'pause=${_pauseUsesAudioLength ? 'audio length' : '${_paddingSeconds}s'}',
       );
 
-      for (var i = 0; i < _repeatCount; i++) {
-        if (_stopPlaybackRequested) {
-          break;
-        }
-
-        await player.play(DeviceFileSource(wavPath));
-        await player.setPlaybackRate(_playbackSpeed);
-
-        await player.onPlayerComplete.first;
-
-        if (_stopPlaybackRequested) {
-          break;
-        }
-
-        if (i < _repeatCount - 1) {
-          final pauseSeconds = _pauseUsesAudioLength
-              ? await _getWavDurationSeconds(wavPath)
-              : _paddingSeconds;
-
-          if (pauseSeconds > 0) {
-            await Future.delayed(
-              Duration(milliseconds: (pauseSeconds * 1000).round()),
-            );
-          }
-        }
-      }
+      final outcome = await session.run();
 
       if (!mounted) {
         return;
       }
 
+      final stopped = outcome == PlaybackOutcome.stopped;
+
       setState(() {
-        _status = _stopPlaybackRequested
-            ? 'Playback stopped.'
-            : 'Playback complete.';
+        _status = stopped ? 'Playback stopped.' : 'Playback complete.';
       });
 
       print(
-        _stopPlaybackRequested
-            ? 'VieNeu: playback stopped.'
-            : 'VieNeu: playback complete.',
+        stopped ? 'VieNeu: playback stopped.' : 'VieNeu: playback complete.',
       );
     } catch (error, stackTrace) {
       print('VieNeu: playback failed: $error');
@@ -573,12 +554,15 @@ class _HomePageState extends State<HomePage> {
         return;
       }
 
+      final stopped = session?.stopRequested ?? false;
+
       setState(() {
-        _status = 'Playback failed: $error';
+        _status = stopped ? 'Playback stopped.' : 'Playback failed: $error';
       });
     } finally {
-      await player.dispose();
-      _stopPlaybackRequested = false;
+      if (session != null && identical(_playbackSession, session)) {
+        _playbackSession = null;
+      }
 
       if (mounted) {
         setState(() {
@@ -593,13 +577,13 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
-    _stopPlaybackRequested = true;
+    final session = _playbackSession;
 
-    final process = _playbackProcess;
-
-    if (process != null) {
-      process.kill(ProcessSignal.sigterm);
+    if (session == null) {
+      return;
     }
+
+    await session.stop();
   }
 
   Future<double> _getWavDurationSeconds(String path) async {
@@ -801,9 +785,12 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
-    _stopPlaybackRequested = true;
-    _playbackProcess?.kill(ProcessSignal.sigterm);
-    _playbackProcess = null;
+    final session = _playbackSession;
+    _playbackSession = null;
+
+    if (session != null) {
+      unawaited(session.stop());
+    }
 
     _textController.dispose();
     _tts.dispose();
@@ -851,7 +838,8 @@ class _HomePageState extends State<HomePage> {
                           maxLines: 6,
                           textInputAction: TextInputAction.newline,
                           onChanged: (_) {
-                            if (_generatedWavPath != null || _previewedSpeechText != null) {
+                            if (_generatedWavPath != null ||
+                                _previewedSpeechText != null) {
                               setState(() {
                                 _generatedWavPath = null;
                                 _previewedSpeechText = null;
