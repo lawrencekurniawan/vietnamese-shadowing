@@ -36,6 +36,29 @@ responsive because that work is off the main isolate.
 ORT is process-global. The worker is the only production engine creator; the
 main isolate no longer constructs a `VieNeuFfi` engine.
 
+## Curated Generate-tab voices
+
+The native catalog still contains the full stable voice set for older library
+items and `.vshadow` packages. New synthesis is intentionally limited to the
+two southern male presets requested for this release:
+
+- `Adam` (default)
+- `Thái Sơn`
+
+`lib/voices/voice_preferences.dart` filters the native catalog through
+`selectPreferredVoices()` and resolves `defaultPreferredVoice()`. If either
+preferred preset is absent, startup fails with a `StateError` instead of
+silently selecting an unrelated voice. The Generate tab therefore shows:
+
+```text
+Nam · male · Adam
+Nam · male · Thái Sơn
+```
+
+A previously saved voice outside this curated set is ignored on startup and
+falls back to `Adam`. Library playback and package import continue to use the
+voice metadata stored with each item.
+
 ## Durable library
 
 `lib/library/library_repository.dart` stores items under:
@@ -114,15 +137,20 @@ File handling:
 - macOS uses the native save dialog for export and the file picker for import.
 - Both `ios/Runner/Info.plist` and `macos/Runner/Info.plist` register the
   `com.example.vietnameseshadowing.vshadow` type and the `.vshadow` extension.
+- iOS forwards an opened document through `AppDelegate`/`SceneDelegate`; macOS
+  forwards it through `AppDelegate.openFile`/`openURL`. The Dart document channel
+  drains the pending path, imports the package, and switches to the Library tab.
 - The checksum is an integrity check only, not an authenticity guarantee.
 
 ## Validation
 
 Automated:
 
-- Focused Flutter tests cover stable IDs, WAV names, playback, the worker
-  protocol, durable storage, cache independence, package validation, import
-  safety, and export/import round trips.
+- Focused Flutter tests cover stable IDs, the curated voice catalog, both
+  curated voices in the Generate flow, WAV names, playback, the worker protocol,
+  durable storage, cache independence, package validation, import safety, and
+  export/import round trips.
+- `flutter test --timeout 90s` passes all 93 tests.
 - `flutter analyze` reports only the pre-existing `avoid_print` findings.
 - `flutter build ios --simulator` succeeds.
 
@@ -142,5 +170,6 @@ Simulator:
 - Native synthesis cannot be cancelled mid-inference.
 - Package and audio decoding are in-memory; a future version may stream large
   packages.
-- This release does not register an external document-open handler that changes
-  the current tab automatically. Import is initiated from the Library tab.
+- The native Files/Finder document-open bridge compiles and has Dart channel
+  coverage, but it has not been exercised interactively in this validation
+  cycle. The in-app Library import path remains the verified fallback.

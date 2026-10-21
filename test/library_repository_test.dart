@@ -8,12 +8,12 @@ import 'support/wav_fixture.dart';
 
 void main() {
   const voice = VoiceMetadata(
-    stableId: 'mai-anh',
-    presetName: 'Mai Anh',
-    displayName: 'Mai Anh',
-    description: 'Nữ · Bắc · Phong cách tự nhiên',
-    gender: 'female',
-    accent: 'Bắc',
+    stableId: 'adam',
+    presetName: 'Adam',
+    displayName: 'Adam',
+    description: 'Nam · Nam · Giọng đọc tự nhiên',
+    gender: 'male',
+    accent: 'Nam',
     style: 'tu_nhien',
   );
 
@@ -84,7 +84,7 @@ void main() {
 
     expect(items, hasLength(1));
     expect(items.single.title, 'Persisted item');
-    expect(items.single.voice.stableId, 'mai-anh');
+    expect(items.single.voice.stableId, 'adam');
     expect(await reopened.audioFile(items.single.itemId).exists(), isTrue);
   });
 

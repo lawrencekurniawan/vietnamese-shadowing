@@ -10,12 +10,12 @@ void main() {
     originalText: 'Xin chào, thế giới!',
     normalizedText: 'xin chào, thế giới!',
     voice: VoiceMetadata(
-      stableId: 'mai-anh',
-      presetName: 'Mai Anh',
-      displayName: 'Mai Anh',
-      description: 'Nữ · Bắc · Phong cách tự nhiên',
-      gender: 'female',
-      accent: 'Bắc',
+      stableId: 'adam',
+      presetName: 'Adam',
+      displayName: 'Adam',
+      description: 'Nam · Nam · Giọng đọc tự nhiên',
+      gender: 'male',
+      accent: 'Nam',
       style: 'tu_nhien',
     ),
     createdAtUtc: DateTime.utc(2026, 10, 20, 12),
@@ -58,7 +58,7 @@ void main() {
     await tester.pumpWidget(buildCard(isCurrent: false, isPlaying: false));
 
     expect(find.text('Xin chào'), findsOneWidget);
-    expect(find.textContaining('Bắc'), findsOneWidget);
+    expect(find.textContaining('Nam'), findsOneWidget);
     expect(find.textContaining('1.3s'), findsOneWidget);
 
     await tester.tap(find.byKey(playKey));

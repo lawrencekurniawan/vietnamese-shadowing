@@ -14,12 +14,12 @@ import 'support/wav_fixture.dart';
 
 void main() {
   const voice = VoiceMetadata(
-    stableId: 'mai-anh',
-    presetName: 'Mai Anh',
-    displayName: 'Mai Anh',
-    description: 'Nữ · Bắc · Phong cách tự nhiên',
-    gender: 'female',
-    accent: 'Bắc',
+    stableId: 'adam',
+    presetName: 'Adam',
+    displayName: 'Adam',
+    description: 'Nam · Nam · Giọng đọc tự nhiên',
+    gender: 'male',
+    accent: 'Nam',
     style: 'tu_nhien',
   );
 
@@ -28,8 +28,8 @@ void main() {
 
   VshadowMetadata createMetadata({
     List<int>? audioBytes,
-    String stableId = 'mai-anh',
-    String presetName = 'Mai Anh',
+    String stableId = 'adam',
+    String presetName = 'Adam',
     int? sampleRate,
     String? checksum,
   }) {
@@ -87,7 +87,7 @@ void main() {
     expect(
       buildVshadowExportFilename(
         text: 'Xin chào, thế giới!',
-        stableVoiceId: 'mai-anh',
+        stableVoiceId: 'adam',
         exportedAt: DateTime(2026, 10, 20, 14, 30, 45),
       ),
       endsWith('.vshadow'),
@@ -259,7 +259,7 @@ void main() {
         expect(imported.title, original.title);
         expect(imported.originalText, original.originalText);
         expect(imported.normalizedText, original.normalizedText);
-        expect(imported.voice.stableId, 'mai-anh');
+        expect(imported.voice.stableId, 'adam');
         expect(imported.createdAtUtc, original.createdAtUtc);
         expect(
           await repository.audioFile(imported.itemId).readAsBytes(),

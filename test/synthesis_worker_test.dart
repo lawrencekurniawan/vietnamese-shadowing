@@ -33,8 +33,8 @@ void main() {
     );
 
     expect(voices, hasLength(1));
-    expect(voices.single.name, 'Mai Anh');
-    expect(voices.single.accent, 'Bắc');
+    expect(voices.single.name, 'Adam');
+    expect(voices.single.accent, 'Nam');
   });
 
   test('propagates initialization errors', () async {
@@ -50,7 +50,7 @@ void main() {
     final worker = createWorker();
 
     await expectLater(
-      worker.synthesizeToWav(text: 'xin chào', voiceId: 'Mai Anh'),
+      worker.synthesizeToWav(text: 'xin chào', voiceId: 'Adam'),
       throwsA(isA<StateError>()),
     );
 
@@ -69,14 +69,14 @@ void main() {
 
     final result = await worker.synthesizeToWav(
       text: 'xin chào',
-      voiceId: 'Mai Anh',
+      voiceId: 'Adam',
     );
 
     expect(result.path, '/tmp/xin chào.wav');
     expect(result.cacheHit, isFalse);
 
     await expectLater(
-      worker.synthesizeToWav(text: 'fail', voiceId: 'Mai Anh'),
+      worker.synthesizeToWav(text: 'fail', voiceId: 'Adam'),
       throwsA(isA<StateError>()),
     );
   });
@@ -86,9 +86,9 @@ void main() {
     await worker.initialize(assetsRoot: '/assets', cacheRoot: '/cache');
 
     final results = await Future.wait([
-      worker.synthesizeToWav(text: 'first', voiceId: 'Mai Anh'),
-      worker.synthesizeToWav(text: 'second', voiceId: 'Mai Anh'),
-      worker.synthesizeToWav(text: 'third', voiceId: 'Mai Anh'),
+      worker.synthesizeToWav(text: 'first', voiceId: 'Adam'),
+      worker.synthesizeToWav(text: 'second', voiceId: 'Adam'),
+      worker.synthesizeToWav(text: 'third', voiceId: 'Adam'),
     ]);
 
     expect(results.map((result) => result.path), [
@@ -103,7 +103,7 @@ void main() {
     await worker.initialize(assetsRoot: '/assets', cacheRoot: '/cache');
 
     var mainIsolateTicked = false;
-    final synthesis = worker.synthesizeToWav(text: 'slow', voiceId: 'Mai Anh');
+    final synthesis = worker.synthesizeToWav(text: 'slow', voiceId: 'Adam');
 
     await Future<void>.delayed(const Duration(milliseconds: 20));
     mainIsolateTicked = true;
@@ -120,7 +120,7 @@ void main() {
 
     expect(await worker.previewSpeechText('xin chào'), 'PREVIEW:xin chào');
     expect(
-      await worker.clearCachedText(text: 'xin chào', voiceId: 'Mai Anh'),
+      await worker.clearCachedText(text: 'xin chào', voiceId: 'Adam'),
       isTrue,
     );
 
@@ -132,7 +132,7 @@ void main() {
     await worker.initialize(assetsRoot: '/assets', cacheRoot: '/cache');
 
     await expectLater(
-      worker.synthesizeToWav(text: 'exit', voiceId: 'Mai Anh'),
+      worker.synthesizeToWav(text: 'exit', voiceId: 'Adam'),
       throwsA(isA<StateError>()),
     );
   });
@@ -179,11 +179,11 @@ Future<void> fakeSynthesisWorker(SendPort mainSendPort) async {
             'ok': true,
             'result': jsonEncode([
               <String, Object?>{
-                'id': 'Mai Anh',
-                'name': 'Mai Anh',
-                'description': 'Nữ · Bắc · Phong cách tự nhiên',
-                'gender': 'female',
-                'accent': 'Bắc',
+                'id': 'Adam',
+                'name': 'Adam',
+                'description': 'Nam · Nam · Giọng đọc tự nhiên',
+                'gender': 'male',
+                'accent': 'Nam',
                 'style': 'tu_nhien',
               },
             ]),

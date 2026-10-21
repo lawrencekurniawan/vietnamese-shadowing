@@ -22,22 +22,31 @@ const documentChannel = MethodChannel(DocumentOpenService.channelName);
 const codec = StandardMethodCodec();
 
 void main() {
-  const voice = VietnameseVoice(
-    id: 'Mai Anh',
-    name: 'Mai Anh',
-    description: 'Nữ · Bắc · Phong cách tự nhiên',
-    gender: 'female',
-    accent: 'Bắc',
+  const adamVoice = VietnameseVoice(
+    id: 'Adam',
+    name: 'Adam',
+    description: 'Nam · Nam · Giọng đọc tự nhiên',
+    gender: 'male',
+    accent: 'Nam',
     style: 'tu_nhien',
   );
 
+  const thaiSonVoice = VietnameseVoice(
+    id: 'Thái Sơn',
+    name: 'Thái Sơn',
+    description: 'Nam · Nam · Phong cách kể chuyện',
+    gender: 'male',
+    accent: 'Nam',
+    style: 'doc_truyen',
+  );
+
   const voiceMetadata = VoiceMetadata(
-    stableId: 'mai-anh',
-    presetName: 'Mai Anh',
-    displayName: 'Mai Anh',
-    description: 'Nữ · Bắc · Phong cách tự nhiên',
-    gender: 'female',
-    accent: 'Bắc',
+    stableId: 'adam',
+    presetName: 'Adam',
+    displayName: 'Adam',
+    description: 'Nam · Nam · Giọng đọc tự nhiên',
+    gender: 'male',
+    accent: 'Nam',
     style: 'tu_nhien',
   );
 
@@ -60,7 +69,7 @@ void main() {
     });
 
     final synthesis = FakeSynthesisService(
-      voices: const [voice],
+      voices: const [adamVoice, thaiSonVoice],
       wavPath: sourceWav.path,
     );
     final playback = FakePlaybackAudio();
@@ -74,8 +83,8 @@ void main() {
             playbackAudioFactory: () => playback,
             bootstrap: () async {
               return HomeBootstrap(
-                voices: const [voice],
-                selectedVoice: voice,
+                voices: const [adamVoice, thaiSonVoice],
+                selectedVoice: adamVoice,
                 libraryRepository: repository,
                 libraryItems: const [],
               );
@@ -99,6 +108,7 @@ void main() {
     await tester.pump();
 
     expect(synthesis.synthesizeCalls, 1);
+    expect(synthesis.synthesizeVoiceIds, ['Adam']);
     expect(find.text('Synthesis complete — cache MISS'), findsOneWidget);
 
     final saveButton = find.byKey(
@@ -156,6 +166,81 @@ void main() {
     expect(find.text('Hôm nay bạn khỏe không?'), findsWidgets);
   });
 
+  testWidgets('generates with both curated voices', (tester) async {
+    final temporaryDirectory = Directory.systemTemp.createTempSync(
+      'vshadow-voice-flow-',
+    );
+    final sourceWav = File('${temporaryDirectory.path}/source.wav')
+      ..writeAsBytesSync(buildTestWav(sampleRate: 48000, sampleFrames: 48000));
+    final repository = FakeLibraryRepository(
+      applicationSupportDirectory: temporaryDirectory,
+    );
+
+    _installDocumentHandler();
+    addTearDown(() {
+      _removeDocumentHandler();
+      temporaryDirectory.deleteSync(recursive: true);
+    });
+
+    final synthesis = FakeSynthesisService(
+      voices: const [adamVoice, thaiSonVoice],
+      wavPath: sourceWav.path,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HomePage(
+          environment: HomePageEnvironment(
+            synthesisService: synthesis,
+            preferences: MemoryPreferenceStore(),
+            playbackAudioFactory: () => FakePlaybackAudio(),
+            bootstrap: () async {
+              return HomeBootstrap(
+                voices: const [adamVoice, thaiSonVoice],
+                selectedVoice: adamVoice,
+                libraryRepository: repository,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Nam · male · Adam'), findsOneWidget);
+
+    final generateButton = find.byKey(
+      const ValueKey<String>('generate-button'),
+    );
+    await tester.ensureVisible(generateButton);
+    await tester.tap(generateButton);
+    await tester.pump();
+    await tester.pump();
+
+    expect(synthesis.synthesizeVoiceIds, ['Adam']);
+
+    final voiceDropdown = find.byKey(const ValueKey<String>('voice-dropdown'));
+    await tester.ensureVisible(voiceDropdown);
+    await tester.tap(voiceDropdown);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    await tester.tap(find.text('Nam · male · Thái Sơn').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Voice selected: Thái Sơn'), findsOneWidget);
+
+    await tester.ensureVisible(generateButton);
+    await tester.tap(generateButton);
+    await tester.pump();
+    await tester.pump();
+
+    expect(synthesis.synthesizeVoiceIds, ['Adam', 'Thái Sơn']);
+  });
+
   testWidgets('imports a .vshadow opened by the operating system', (
     tester,
   ) async {
@@ -185,7 +270,7 @@ void main() {
     });
 
     final synthesis = FakeSynthesisService(
-      voices: const [voice],
+      voices: const [adamVoice, thaiSonVoice],
       wavPath: '${library.directory.path}/unused.wav',
     );
 
@@ -197,8 +282,8 @@ void main() {
             preferences: MemoryPreferenceStore(),
             bootstrap: () async {
               return HomeBootstrap(
-                voices: const [voice],
-                selectedVoice: voice,
+                voices: const [adamVoice, thaiSonVoice],
+                selectedVoice: adamVoice,
                 libraryRepository: library.repository,
                 libraryItems: initialItems!,
               );

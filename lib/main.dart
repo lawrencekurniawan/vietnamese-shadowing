@@ -28,6 +28,7 @@ import 'playback/playback_session.dart';
 import 'ui/home_tab_scaffold.dart';
 import 'ui/library_item_card.dart';
 import 'voices/voice_identity.dart';
+import 'voices/voice_preferences.dart';
 
 void main() {
   runApp(const VietnameseShadowingApp());
@@ -151,12 +152,7 @@ class _HomePageState extends State<HomePage> {
         debugPrint('VieNeu: applying injected startup state.');
 
         final data = await bootstrap();
-        final voices = List<VietnameseVoice>.of(data.voices)
-          ..sort(compareVoicesForDisplay);
-
-        if (voices.isEmpty) {
-          throw StateError('No voices loaded.');
-        }
+        final voices = selectPreferredVoices(data.voices);
 
         VoiceCatalog.fromVoices(voices);
 
@@ -243,7 +239,7 @@ class _HomePageState extends State<HomePage> {
 
       print('VieNeu: staged assets root = ${stagedAssetsRoot.path}');
 
-      final voices = await _tts.initialize(
+      final nativeVoices = await _tts.initialize(
         assetsRoot: stagedAssetsRoot.path,
         cacheRoot: cacheRoot,
         ortPath: ortPath,
@@ -251,15 +247,13 @@ class _HomePageState extends State<HomePage> {
 
       print('VieNeu: AFTER native engine create');
 
-      voices.sort(compareVoicesForDisplay);
-
+      final voices = selectPreferredVoices(nativeVoices);
       final voiceCatalog = VoiceCatalog.fromVoices(voices);
 
-      print('VieNeu: loaded ${voices.length} voices.');
-
-      if (voices.isEmpty) {
-        throw StateError('No voices loaded.');
-      }
+      print(
+        'VieNeu: native catalog = ${nativeVoices.length} voices; '
+        'using ${voices.length} preferred voices.',
+      );
 
       final savedVoiceId = await _preferences.getString(
         _defaultVoiceIdPreferenceKey,
@@ -300,7 +294,7 @@ class _HomePageState extends State<HomePage> {
         'pause=${pauseUsesAudioLength ? 'audio length' : '${paddingSeconds}s'}',
       );
 
-      VietnameseVoice selectedVoice = voices.first;
+      VietnameseVoice selectedVoice = defaultPreferredVoice(voices);
 
       final savedStableVoice = savedVoiceId == null
           ? null
@@ -1793,6 +1787,7 @@ class _HomePageState extends State<HomePage> {
                         const SizedBox(height: 4),
 
                         DropdownButton<VietnameseVoice>(
+                          key: const ValueKey<String>('voice-dropdown'),
                           value: _selectedVoice,
                           isExpanded: true,
                           items: _voices.map((voice) {
