@@ -56,8 +56,9 @@ Nam · male · Thái Sơn
 ```
 
 A previously saved voice outside this curated set is ignored on startup and
-falls back to `Adam`. Library playback and package import continue to use the
-voice metadata stored with each item.
+falls back to `Adam`; `resolvePreferredVoice()` isolates and tests that
+migration path. Library playback and package import continue to use the voice
+metadata stored with each item.
 
 ## Durable library
 
@@ -150,7 +151,7 @@ Automated:
   curated voices in the Generate flow, WAV names, playback, the worker protocol,
   durable storage, cache independence, package validation, import safety, and
   export/import round trips.
-- `flutter test --timeout 90s` passes all 93 tests.
+- `flutter test --timeout 90s` passes all 98 tests.
 - `flutter analyze` reports only the pre-existing `avoid_print` findings.
 - `flutter build ios --simulator` succeeds.
 

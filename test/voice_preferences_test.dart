@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vietnamese_shadowing/native/vieneu_ffi.dart';
+import 'package:vietnamese_shadowing/voices/voice_identity.dart';
 import 'package:vietnamese_shadowing/voices/voice_preferences.dart';
 
 void main() {
@@ -83,5 +84,104 @@ void main() {
         ),
       ),
     );
+  });
+
+  group('resolvePreferredVoice', () {
+    late VoiceCatalog catalog;
+    late VietnameseVoice defaultVoice;
+
+    setUp(() {
+      final curated = selectPreferredVoices(catalogVoices);
+      catalog = VoiceCatalog.fromVoices(curated);
+      defaultVoice = defaultPreferredVoice(curated);
+    });
+
+    test('uses the curated default when no preference is saved', () {
+      expect(
+        resolvePreferredVoice(catalog: catalog, defaultVoice: defaultVoice),
+        defaultVoice,
+      );
+    });
+
+    test('restores either curated voice from its stable ID', () {
+      expect(
+        resolvePreferredVoice(
+          catalog: catalog,
+          defaultVoice: defaultVoice,
+          savedStableId: 'adam',
+        ).name,
+        'Adam',
+      );
+
+      expect(
+        resolvePreferredVoice(
+          catalog: catalog,
+          defaultVoice: defaultVoice,
+          savedStableId: 'thai-son',
+        ).name,
+        'Thái Sơn',
+      );
+    });
+
+    test('supports the legacy preset-name preference', () {
+      expect(
+        resolvePreferredVoice(
+          catalog: catalog,
+          defaultVoice: defaultVoice,
+          legacySavedVoiceId: 'Adam',
+        ).name,
+        'Adam',
+      );
+
+      expect(
+        resolvePreferredVoice(
+          catalog: catalog,
+          defaultVoice: defaultVoice,
+          legacySavedVoiceId: 'Thái Sơn',
+        ).name,
+        'Thái Sơn',
+      );
+    });
+
+    test('a stable-ID preference takes priority over the legacy value', () {
+      expect(
+        resolvePreferredVoice(
+          catalog: catalog,
+          defaultVoice: defaultVoice,
+          savedStableId: 'thai-son',
+          legacySavedVoiceId: 'Adam',
+        ).name,
+        'Thái Sơn',
+      );
+    });
+
+    test('non-curated saved voices fall back to Adam', () {
+      expect(
+        resolvePreferredVoice(
+          catalog: catalog,
+          defaultVoice: defaultVoice,
+          savedStableId: 'mai-anh',
+        ).name,
+        'Adam',
+      );
+
+      expect(
+        resolvePreferredVoice(
+          catalog: catalog,
+          defaultVoice: defaultVoice,
+          legacySavedVoiceId: 'Mai Anh',
+        ).name,
+        'Adam',
+      );
+
+      expect(
+        resolvePreferredVoice(
+          catalog: catalog,
+          defaultVoice: defaultVoice,
+          savedStableId: 'not-a-voice',
+        ).name,
+        'Adam',
+      );
+    });
   });
 }

@@ -294,22 +294,12 @@ class _HomePageState extends State<HomePage> {
         'pause=${pauseUsesAudioLength ? 'audio length' : '${paddingSeconds}s'}',
       );
 
-      VietnameseVoice selectedVoice = defaultPreferredVoice(voices);
-
-      final savedStableVoice = savedVoiceId == null
-          ? null
-          : voiceCatalog.byStableId(savedVoiceId);
-
-      final legacySavedVoice = legacySavedVoiceId == null
-          ? null
-          : voiceCatalog.byStableId(legacySavedVoiceId) ??
-                voiceCatalog.byPresetName(legacySavedVoiceId);
-
-      final resolvedSavedVoice = savedStableVoice ?? legacySavedVoice;
-
-      if (resolvedSavedVoice != null) {
-        selectedVoice = resolvedSavedVoice;
-      }
+      final selectedVoice = resolvePreferredVoice(
+        catalog: voiceCatalog,
+        defaultVoice: defaultPreferredVoice(voices),
+        savedStableId: savedVoiceId,
+        legacySavedVoiceId: legacySavedVoiceId,
+      );
 
       print(
         'VieNeu: saved default voice = '

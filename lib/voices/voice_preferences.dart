@@ -1,4 +1,5 @@
 import '../native/vieneu_ffi.dart';
+import 'voice_identity.dart';
 
 /// Native presets exposed by the Generate tab.
 ///
@@ -45,4 +46,28 @@ VietnameseVoice defaultPreferredVoice(Iterable<VietnameseVoice> voices) {
   throw StateError(
     'Missing default voice preset "$defaultPreferredVoicePresetName".',
   );
+}
+
+/// Resolves a persisted preference against the curated catalog.
+///
+/// Preferences saved by older releases can refer to voices that are no longer
+/// offered by the Generate tab. Those preferences are ignored and the curated
+/// default is used instead. The legacy preset-name preference is still honored
+/// when it maps to a curated voice.
+VietnameseVoice resolvePreferredVoice({
+  required VoiceCatalog catalog,
+  required VietnameseVoice defaultVoice,
+  String? savedStableId,
+  String? legacySavedVoiceId,
+}) {
+  final savedStableVoice = savedStableId == null
+      ? null
+      : catalog.byStableId(savedStableId);
+
+  final legacySavedVoice = legacySavedVoiceId == null
+      ? null
+      : catalog.byStableId(legacySavedVoiceId) ??
+            catalog.byPresetName(legacySavedVoiceId);
+
+  return savedStableVoice ?? legacySavedVoice ?? defaultVoice;
 }
