@@ -40,6 +40,8 @@ dependencies:
   shared_preferences: ^2.5.5
   audioplayers: ^6.8.1
   share_plus: ^13.3.0
+  archive: ^4.5.2
+  crypto: ^3.0.7
 
 dev_dependencies:
   flutter_test:
