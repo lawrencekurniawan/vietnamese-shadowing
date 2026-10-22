@@ -98,6 +98,8 @@ The Library tab supports:
 - Export WAV
 - Export `.vshadow`
 - Import `.vshadow`
+- Back up the full library and settings to `.vshadowbackup`
+- Restore a `.vshadowbackup` file
 
 Deleting the currently playing item stops playback before removing its audio.
 
@@ -148,6 +150,55 @@ File handling:
   drains the pending path, imports the package, and switches to the Library tab.
 - The checksum is an integrity check only, not an authenticity guarantee.
 
+## Full-library backup
+
+`lib/library/vshadow_backup.dart` defines a versioned `.vshadowbackup`
+container. The archive contains:
+
+```text
+backup.json
+items/<item-uuid>/metadata.json
+items/<item-uuid>/audio.wav
+```
+
+`backup.json` stores:
+
+- Backup schema version and creation time
+- Default voice stable ID and preset name
+- Playback speed, repeat count, pause duration, and pause mode
+- The ordered list of item UUIDs
+
+Each item uses the same portable `VshadowMetadata` and WAV payload validation as
+a `.vshadow` package, including voice identity and SHA-256 checksum checks. The
+backup limit is 512 MiB, the manifest limit is 2 MiB, and one backup may contain
+up to 500 items. Individual item metadata and audio limits match `.vshadow`.
+
+Restore behavior:
+
+- The entire archive, manifest, settings, and every item are validated before
+  the first install.
+- Backup item IDs are preserved.
+- An item whose ID already exists is skipped, never overwritten, so retrying an
+  interrupted restore is idempotent.
+- Restored playback and voice settings are applied and persisted.
+- A voice saved by an older release falls back to the curated default when it
+  is no longer offered by the Generate tab.
+
+Cloud storage uses the iOS Files document flow rather than an iCloud
+entitlement:
+
+- **Back Up** writes a temporary `.vshadowbackup` file and opens the iOS share
+  sheet. **Save to Files** lets the user choose iCloud Drive or Google Drive.
+- **Restore** opens the Files picker with the exported
+  `com.example.vietnameseshadowing.vshadowbackup` type.
+- Both plists declare the type and `.vshadowbackup` extension. The backup is not
+  registered as an external-open document type, so restore is always an explicit
+  in-app action.
+- This works with sideloaded builds and free provisioning, where iCloud
+  container entitlements may be unavailable.
+
+No background iCloud sync or OAuth-based Google Drive integration is included.
+
 ## Validation
 
 Automated:
@@ -155,8 +206,9 @@ Automated:
 - Focused Flutter tests cover stable IDs, the curated voice catalog, both
   curated voices in the Generate flow, voice preview, WAV names, playback, the
   worker protocol, durable storage, cache independence, package validation,
-  import safety, and export/import round trips.
-- `flutter test --timeout 90s` passes all 99 tests.
+  import safety, export/import round trips, backup validation, idempotent
+  restore, settings, and filenames.
+- `flutter test --timeout 90s` passes all 108 tests.
 - `flutter analyze` reports only `avoid_print` findings.
 - `flutter build ios --simulator` succeeds.
 
@@ -175,8 +227,12 @@ Simulator:
 ## Known limitations
 
 - Native synthesis cannot be cancelled mid-inference.
-- Package and audio decoding are in-memory; a future version may stream large
-  packages.
+- Package, backup, and audio decoding are in-memory; a future version may stream
+  large files. The current backup cap is 512 MiB.
+- Backups are manual and stored wherever the user chooses in Files. There is no
+  automatic iCloud or Google Drive sync.
+- Backups are ZIP containers without encryption; the checksum verifies
+  integrity, not authenticity or confidentiality.
 - The native Files/Finder document-open bridge compiles and has Dart channel
   coverage, but it has not been exercised interactively in this validation
   cycle. The in-app Library import path remains the verified fallback.

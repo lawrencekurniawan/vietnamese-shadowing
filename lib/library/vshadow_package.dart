@@ -207,7 +207,21 @@ VshadowPackageData decodeVshadowPackage(
     throw const FormatException('.vshadow metadata must be a JSON object.');
   }
 
-  final metadata = VshadowMetadata.fromJson(decoded.cast<String, dynamic>());
+  return validateVshadowPayload(
+    metadataJson: decoded.cast<String, dynamic>(),
+    audioBytes: audioBytes,
+  );
+}
+
+/// Validates portable `.vshadow` metadata against its exact audio payload.
+///
+/// Container formats such as full-library backups reuse this so checksum, WAV,
+/// and voice-identity rules stay identical to a single-item package.
+VshadowPackageData validateVshadowPayload({
+  required Map<String, dynamic> metadataJson,
+  required Uint8List audioBytes,
+}) {
+  final metadata = VshadowMetadata.fromJson(metadataJson);
 
   _validatePortableVoiceIdentity(metadata.voice);
 

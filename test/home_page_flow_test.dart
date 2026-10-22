@@ -164,6 +164,15 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(find.text('Hôm nay bạn khỏe không?'), findsWidgets);
+    expect(
+      find.byKey(const ValueKey<String>('backup-library-button')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey<String>('restore-backup-button')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('iCloud Drive or Google Drive'), findsOneWidget);
   });
 
   testWidgets('generates with both curated voices', (tester) async {

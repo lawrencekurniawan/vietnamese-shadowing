@@ -19,6 +19,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'library/library_metadata.dart';
 import 'library/library_repository.dart';
+import 'library/vshadow_backup.dart';
 import 'library/vshadow_package.dart';
 import 'library/wav_export_filename.dart';
 import 'native/vieneu_ffi.dart';
@@ -82,6 +83,9 @@ class _HomePageState extends State<HomePage> {
   static const String _vshadowUniformTypeIdentifier =
       'com.example.vietnameseshadowing.vshadow';
 
+  static const String _vshadowBackupUniformTypeIdentifier =
+      'com.example.vietnameseshadowing.vshadowbackup';
+
   static const String _voicePreviewText = 'Xin chào, đây là giọng đọc mẫu.';
 
   final TextEditingController _textController = TextEditingController(
@@ -117,6 +121,7 @@ class _HomePageState extends State<HomePage> {
   LibraryRepository? _libraryRepository;
   List<LibraryItemMetadata> _libraryItems = const [];
   bool _isLibraryLoading = false;
+  bool _isBackupBusy = false;
   String? _libraryError;
 
   double _playbackSpeed = 1.0;
@@ -1210,6 +1215,282 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _exportLibraryBackup() async {
+    final repository = _libraryRepository;
+
+    if (repository == null) {
+      _showStatus('Library is unavailable.');
+      return;
+    }
+
+    if (_isBackupBusy || _isLibraryLoading) {
+      return;
+    }
+
+    setState(() {
+      _isBackupBusy = true;
+      _status = 'Preparing backup...';
+    });
+
+    try {
+      final voice = _selectedVoice;
+      final settings = VshadowBackupSettings(
+        defaultVoiceStableId: voice?.stableId,
+        defaultVoicePresetName: voice?.name,
+        playbackSpeed: _playbackSpeed,
+        repeatCount: _repeatCount,
+        paddingSeconds: _paddingSeconds,
+        pauseUsesAudioLength: _pauseUsesAudioLength,
+      );
+      final service = VshadowBackupService(repository: repository);
+      final bytes = await service.exportBackup(
+        items: _libraryItems,
+        settings: settings,
+      );
+      final suggestedName = buildVshadowBackupFilename(
+        exportedAt: DateTime.now(),
+      );
+
+      if (Platform.isIOS) {
+        final temporaryDirectory = await getTemporaryDirectory();
+        final temporaryFile = File('${temporaryDirectory.path}/$suggestedName');
+
+        await temporaryFile.writeAsBytes(bytes, flush: true);
+
+        if (mounted) {
+          setState(() {
+            _status = 'Opening share sheet...';
+          });
+        }
+
+        await share_plus.SharePlus.instance.share(
+          share_plus.ShareParams(
+            title: 'Vietnamese Shadowing Backup',
+            files: [
+              share_plus.XFile(
+                temporaryFile.path,
+                name: suggestedName,
+                mimeType: 'application/zip',
+              ),
+            ],
+          ),
+        );
+
+        if (mounted) {
+          setState(() {
+            _status = 'Backup share sheet closed.';
+          });
+        }
+
+        return;
+      }
+
+      final saveLocation = await getSaveLocation(
+        suggestedName: suggestedName,
+        acceptedTypeGroups: const [
+          XTypeGroup(
+            label: 'Vietnamese Shadowing backup',
+            extensions: ['vshadowbackup'],
+            mimeTypes: ['application/zip', 'application/octet-stream'],
+            uniformTypeIdentifiers: [_vshadowBackupUniformTypeIdentifier],
+          ),
+        ],
+      );
+
+      if (saveLocation == null) {
+        if (mounted) {
+          setState(() {
+            _status = 'Backup canceled.';
+          });
+        }
+        return;
+      }
+
+      await File(saveLocation.path).writeAsBytes(bytes, flush: true);
+
+      if (mounted) {
+        setState(() {
+          _status = 'Backup saved.';
+        });
+      }
+    } catch (error, stackTrace) {
+      _reportBackupFailure(error, stackTrace);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isBackupBusy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _importLibraryBackup() async {
+    final repository = _libraryRepository;
+
+    if (repository == null) {
+      _showStatus('Library is unavailable.');
+      return;
+    }
+
+    if (_isBackupBusy || _isLibraryLoading) {
+      return;
+    }
+
+    setState(() {
+      _isBackupBusy = true;
+      _status = 'Choose a backup file...';
+    });
+
+    try {
+      final selected = await openFile(
+        acceptedTypeGroups: const [
+          XTypeGroup(
+            label: 'Vietnamese Shadowing backup',
+            extensions: ['vshadowbackup'],
+            mimeTypes: ['application/zip', 'application/octet-stream'],
+            uniformTypeIdentifiers: [_vshadowBackupUniformTypeIdentifier],
+          ),
+        ],
+      );
+
+      if (selected == null) {
+        if (mounted) {
+          setState(() {
+            _status = 'Backup restore canceled.';
+          });
+        }
+        return;
+      }
+
+      if (await selected.length() > maxVshadowBackupBytes) {
+        throw const FormatException('Backup exceeds the 512 MiB limit.');
+      }
+
+      await _importLibraryBackupBytes(repository, await selected.readAsBytes());
+    } catch (error, stackTrace) {
+      _reportBackupFailure(error, stackTrace);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isBackupBusy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _importLibraryBackupBytes(
+    LibraryRepository repository,
+    Uint8List bytes,
+  ) async {
+    if (bytes.length > maxVshadowBackupBytes) {
+      throw const FormatException('Backup exceeds the 512 MiB limit.');
+    }
+
+    if (mounted) {
+      setState(() {
+        _status = 'Restoring backup...';
+      });
+    }
+
+    final service = VshadowBackupService(repository: repository);
+    final result = await service.importBackup(bytes);
+
+    await _refreshLibrary();
+    await _applyBackupSettings(result.manifest.settings);
+
+    if (!mounted) {
+      return;
+    }
+
+    final restoredCount = result.importedCount + result.skippedCount;
+
+    setState(() {
+      if (restoredCount == 0) {
+        _status = 'Backup restored. This backup has no saved audio.';
+      } else {
+        _status =
+            'Backup restored: ${result.importedCount} imported, '
+            '${result.skippedCount} already present.';
+      }
+      _selectedTab = 1;
+    });
+  }
+
+  Future<void> _applyBackupSettings(VshadowBackupSettings settings) async {
+    VietnameseVoice? restoredVoice;
+
+    if (_voices.isNotEmpty &&
+        (settings.defaultVoiceStableId != null ||
+            settings.defaultVoicePresetName != null)) {
+      restoredVoice = resolvePreferredVoice(
+        catalog: VoiceCatalog.fromVoices(_voices),
+        defaultVoice: defaultPreferredVoice(_voices),
+        savedStableId: settings.defaultVoiceStableId,
+        legacySavedVoiceId: settings.defaultVoicePresetName,
+      );
+    }
+
+    if (mounted) {
+      setState(() {
+        _playbackSpeed = settings.playbackSpeed;
+        _repeatCount = settings.repeatCount;
+        _paddingSeconds = settings.paddingSeconds;
+        _pauseUsesAudioLength = settings.pauseUsesAudioLength;
+
+        if (restoredVoice != null) {
+          _selectedVoice = restoredVoice;
+          _generatedWavPath = null;
+        }
+      });
+    }
+
+    try {
+      await _preferences.setDouble(
+        _playbackSpeedPreferenceKey,
+        settings.playbackSpeed,
+      );
+      await _preferences.setInt(
+        _repeatCountPreferenceKey,
+        settings.repeatCount,
+      );
+      await _preferences.setDouble(
+        _paddingSecondsPreferenceKey,
+        settings.paddingSeconds,
+      );
+      await _preferences.setBool(
+        _pauseUsesAudioLengthPreferenceKey,
+        settings.pauseUsesAudioLength,
+      );
+
+      if (restoredVoice != null) {
+        await _preferences.setString(
+          _defaultVoiceIdPreferenceKey,
+          restoredVoice.stableId,
+        );
+        await _preferences.setString(
+          _defaultVoicePreferenceKey,
+          restoredVoice.id,
+        );
+      }
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: failed to persist restored backup settings: $error');
+      debugPrint('$stackTrace');
+    }
+  }
+
+  void _reportBackupFailure(Object error, StackTrace stackTrace) {
+    debugPrint('VieNeu: backup operation failed: $error');
+    debugPrint('$stackTrace');
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _status = 'Backup operation failed: $error';
+    });
+  }
+
   Future<void> _refreshLibrary() async {
     final repository = _libraryRepository;
 
@@ -1605,6 +1886,62 @@ class _HomePageState extends State<HomePage> {
             ),
             const SizedBox(height: 12),
           ],
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.cloud_outlined, size: 20),
+                      const SizedBox(width: 8),
+                      Text(
+                        'Backup',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    'Save your library and settings as one file. In the Files '
+                    'sheet, choose iCloud Drive or Google Drive.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilledButton.tonalIcon(
+                        key: const ValueKey<String>('backup-library-button'),
+                        onPressed: _isBackupBusy || _isLibraryLoading
+                            ? null
+                            : _exportLibraryBackup,
+                        icon: const Icon(Icons.cloud_upload_outlined, size: 18),
+                        label: const Text('Back Up'),
+                      ),
+                      OutlinedButton.icon(
+                        key: const ValueKey<String>('restore-backup-button'),
+                        onPressed: _isBackupBusy || _isLibraryLoading
+                            ? null
+                            : _importLibraryBackup,
+                        icon: const Icon(
+                          Icons.cloud_download_outlined,
+                          size: 18,
+                        ),
+                        label: const Text('Restore'),
+                      ),
+                    ],
+                  ),
+                  if (_isBackupBusy) ...[
+                    const SizedBox(height: 12),
+                    const LinearProgressIndicator(),
+                  ],
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );

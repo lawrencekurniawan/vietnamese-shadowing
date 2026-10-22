@@ -69,6 +69,26 @@
 				<string>application/vnd.vietnamese-shadowing.vshadow+zip</string>
 			</dict>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.zip-archive</string>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Vietnamese Shadowing Backup</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.example.vietnameseshadowing.vshadowbackup</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>vshadowbackup</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>application/vnd.vietnamese-shadowing.vshadowbackup+zip</string>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>
