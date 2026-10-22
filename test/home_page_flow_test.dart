@@ -241,6 +241,88 @@ void main() {
     expect(synthesis.synthesizeVoiceIds, ['Adam', 'Thái Sơn']);
   });
 
+  testWidgets('previews the selected voice without generating full text', (
+    tester,
+  ) async {
+    final temporaryDirectory = Directory.systemTemp.createTempSync(
+      'vshadow-voice-preview-',
+    );
+    final sourceWav = File('${temporaryDirectory.path}/preview.wav')
+      ..writeAsBytesSync(buildTestWav(sampleRate: 48000, sampleFrames: 48000));
+    final repository = FakeLibraryRepository(
+      applicationSupportDirectory: temporaryDirectory,
+    );
+
+    _installDocumentHandler();
+    addTearDown(() {
+      _removeDocumentHandler();
+      temporaryDirectory.deleteSync(recursive: true);
+    });
+
+    final synthesis = FakeSynthesisService(
+      voices: const [adamVoice, thaiSonVoice],
+      wavPath: sourceWav.path,
+    );
+    final playback = FakePlaybackAudio();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HomePage(
+          environment: HomePageEnvironment(
+            synthesisService: synthesis,
+            preferences: MemoryPreferenceStore(),
+            playbackAudioFactory: () => playback,
+            bootstrap: () async {
+              return HomeBootstrap(
+                voices: const [adamVoice, thaiSonVoice],
+                selectedVoice: adamVoice,
+                libraryRepository: repository,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.pump();
+    await tester.pump();
+
+    final voiceDropdown = find.byKey(const ValueKey<String>('voice-dropdown'));
+    await tester.ensureVisible(voiceDropdown);
+    await tester.tap(voiceDropdown);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('Nam · male · Thái Sơn').last);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final previewButton = find.byKey(
+      const ValueKey<String>('voice-preview-button'),
+    );
+    await tester.ensureVisible(previewButton);
+    await tester.tap(previewButton);
+    await tester.pump();
+    await tester.pump();
+
+    expect(synthesis.synthesizeCalls, 1);
+    expect(synthesis.synthesizeVoiceIds, ['Thái Sơn']);
+    expect(synthesis.synthesizeTexts, ['Xin chào, đây là giọng đọc mẫu.']);
+    expect(playback.playedPaths, [sourceWav.path]);
+    expect(find.text('Playing voice preview...'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey<String>('stop-generated-button')),
+    );
+    await tester.pump();
+    await tester.runAsync(() async {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    });
+    await tester.pump();
+
+    expect(playback.stopCount, 1);
+    expect(find.text('Playback stopped.'), findsOneWidget);
+  });
+
   testWidgets('imports a .vshadow opened by the operating system', (
     tester,
   ) async {

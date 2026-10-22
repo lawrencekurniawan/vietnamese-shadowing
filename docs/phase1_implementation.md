@@ -60,6 +60,11 @@ falls back to `Adam`; `resolvePreferredVoice()` isolates and tests that
 migration path. Library playback and package import continue to use the voice
 metadata stored with each item.
 
+A **Preview** button next to the voice selector synthesizes the fixed sample
+`Xin chào, đây là giọng đọc mẫu.` with the selected voice and plays it once at
+normal speed. It does not replace the generated full-text audio or save a
+library item.
+
 ## Durable library
 
 `lib/library/library_repository.dart` stores items under:
@@ -148,11 +153,11 @@ File handling:
 Automated:
 
 - Focused Flutter tests cover stable IDs, the curated voice catalog, both
-  curated voices in the Generate flow, WAV names, playback, the worker protocol,
-  durable storage, cache independence, package validation, import safety, and
-  export/import round trips.
-- `flutter test --timeout 90s` passes all 98 tests.
-- `flutter analyze` reports only the pre-existing `avoid_print` findings.
+  curated voices in the Generate flow, voice preview, WAV names, playback, the
+  worker protocol, durable storage, cache independence, package validation,
+  import safety, and export/import round trips.
+- `flutter test --timeout 90s` passes all 99 tests.
+- `flutter analyze` reports only `avoid_print` findings.
 - `flutter build ios --simulator` succeeds.
 
 Simulator:
@@ -161,7 +166,8 @@ Simulator:
 - The staged assets load and the worker-owned native engine reaches
   `new_with_ort() COMPLETE`.
 - Voices, G2P, and all ONNX sessions initialize inside the worker.
-- The Generate tab and Generate/Library navigation are visible.
+- The Generate tab shows the curated `Nam · male · Adam` voice and the voice
+  Preview control; Generate/Library navigation is visible.
 - Library actions and `.vshadow` file-picking dialogs require interactive UI
   exercise; they are covered by repository and package-service tests rather than
   claimed as manually tapped flows.

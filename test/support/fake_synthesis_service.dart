@@ -20,6 +20,7 @@ class FakeSynthesisService implements SynthesisService {
   int clearCacheCalls = 0;
   int disposeCalls = 0;
   final List<String> synthesizeVoiceIds = <String>[];
+  final List<String> synthesizeTexts = <String>[];
 
   @override
   Future<List<VietnameseVoice>> initialize({
@@ -39,6 +40,7 @@ class FakeSynthesisService implements SynthesisService {
   }) async {
     synthesizeCalls++;
     synthesizeVoiceIds.add(voiceId);
+    synthesizeTexts.add(text);
     return (path: wavPath, cacheHit: cacheHit);
   }
 

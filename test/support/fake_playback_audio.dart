@@ -9,6 +9,7 @@ class FakePlaybackAudio implements PlaybackAudio {
   int playCount = 0;
   int stopCount = 0;
   int disposeCount = 0;
+  final List<String> playedPaths = <String>[];
 
   @override
   Stream<void> get onComplete => _completionController.stream;
@@ -16,6 +17,7 @@ class FakePlaybackAudio implements PlaybackAudio {
   @override
   Future<void> play(String path) async {
     playCount++;
+    playedPaths.add(path);
   }
 
   @override

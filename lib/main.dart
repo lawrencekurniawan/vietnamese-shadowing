@@ -82,6 +82,8 @@ class _HomePageState extends State<HomePage> {
   static const String _vshadowUniformTypeIdentifier =
       'com.example.vietnameseshadowing.vshadow';
 
+  static const String _voicePreviewText = 'Xin chào, đây là giọng đọc mẫu.';
+
   final TextEditingController _textController = TextEditingController(
     text: 'Hôm nay bạn khỏe không?',
   );
@@ -538,6 +540,55 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _previewSelectedVoice() async {
+    final voice = _selectedVoice;
+
+    if (voice == null || _isGenerating || _isPlaying) {
+      return;
+    }
+
+    setState(() {
+      _isGenerating = true;
+      _status = 'Generating voice preview...';
+    });
+
+    try {
+      final result = await _tts.synthesizeToWav(
+        text: _voicePreviewText,
+        voiceId: voice.id,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isGenerating = false;
+        _status = 'Voice preview ready.';
+      });
+
+      await _playWavPath(
+        result.path,
+        repeatCount: 1,
+        paddingSeconds: 0,
+        pauseUsesAudioLength: false,
+        playingStatus: 'Playing voice preview...',
+      );
+    } catch (error, stackTrace) {
+      print('VieNeu: voice preview failed: $error');
+      print(stackTrace);
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isGenerating = false;
+        _status = 'Voice preview failed: $error';
+      });
+    }
+  }
+
   Future<void> _clearCurrentCache() async {
     final voice = _selectedVoice;
 
@@ -649,30 +700,42 @@ class _HomePageState extends State<HomePage> {
     await _playWavPath(wavPath);
   }
 
-  Future<void> _playWavPath(String wavPath) async {
+  Future<void> _playWavPath(
+    String wavPath, {
+    double? playbackSpeed,
+    int? repeatCount,
+    double? paddingSeconds,
+    bool? pauseUsesAudioLength,
+    String? playingStatus,
+  }) async {
     if (_isPlaying || _playbackController.isPlaying) {
       return;
     }
 
+    final speed = playbackSpeed ?? _playbackSpeed;
+    final repeats = repeatCount ?? _repeatCount;
+    final padding = paddingSeconds ?? _paddingSeconds;
+    final pauseByLength = pauseUsesAudioLength ?? _pauseUsesAudioLength;
+
     try {
       setState(() {
         _isPlaying = true;
-        _status = 'Playing...';
+        _status = playingStatus ?? 'Playing...';
       });
 
       print('VieNeu: playing $wavPath');
       print(
-        'VieNeu: speed=${_playbackSpeed}x, '
-        'repeats=$_repeatCount, '
-        'pause=${_pauseUsesAudioLength ? 'audio length' : '${_paddingSeconds}s'}',
+        'VieNeu: speed=${speed}x, '
+        'repeats=$repeats, '
+        'pause=${pauseByLength ? 'audio length' : '${padding}s'}',
       );
 
       final outcome = await _playbackController.play(
         wavPath: wavPath,
-        playbackSpeed: _playbackSpeed,
-        repeatCount: _repeatCount,
-        paddingSeconds: _paddingSeconds,
-        pauseUsesAudioLength: _pauseUsesAudioLength,
+        playbackSpeed: speed,
+        repeatCount: repeats,
+        paddingSeconds: padding,
+        pauseUsesAudioLength: pauseByLength,
       );
 
       if (!mounted || outcome == null) {
@@ -1776,27 +1839,49 @@ class _HomePageState extends State<HomePage> {
 
                         const SizedBox(height: 4),
 
-                        DropdownButton<VietnameseVoice>(
-                          key: const ValueKey<String>('voice-dropdown'),
-                          value: _selectedVoice,
-                          isExpanded: true,
-                          items: _voices.map((voice) {
-                            return DropdownMenuItem<VietnameseVoice>(
-                              value: voice,
-                              child: Text(
-                                '${voice.accent} · '
-                                '${voice.gender} · '
-                                '${voice.name}',
+                        Row(
+                          children: [
+                            Expanded(
+                              child: DropdownButton<VietnameseVoice>(
+                                key: const ValueKey<String>('voice-dropdown'),
+                                value: _selectedVoice,
+                                isExpanded: true,
+                                items: _voices.map((voice) {
+                                  return DropdownMenuItem<VietnameseVoice>(
+                                    value: voice,
+                                    child: Text(
+                                      '${voice.accent} · '
+                                      '${voice.gender} · '
+                                      '${voice.name}',
+                                    ),
+                                  );
+                                }).toList(),
+                                onChanged:
+                                    !engineReady || _isGenerating || _isPlaying
+                                    ? null
+                                    : (voice) {
+                                        if (voice != null) {
+                                          _selectVoice(voice);
+                                        }
+                                      },
                               ),
-                            );
-                          }).toList(),
-                          onChanged: !engineReady || _isGenerating || _isPlaying
-                              ? null
-                              : (voice) {
-                                  if (voice != null) {
-                                    _selectVoice(voice);
-                                  }
-                                },
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              key: const ValueKey<String>(
+                                'voice-preview-button',
+                              ),
+                              onPressed:
+                                  !engineReady || _isGenerating || _isPlaying
+                                  ? null
+                                  : _previewSelectedVoice,
+                              icon: const Icon(
+                                Icons.volume_up_outlined,
+                                size: 18,
+                              ),
+                              label: const Text('Preview'),
+                            ),
+                          ],
                         ),
 
                         const SizedBox(height: 8),
