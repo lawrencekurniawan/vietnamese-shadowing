@@ -277,6 +277,7 @@ void main() {
                 voices: const [adamVoice, thaiSonVoice],
                 selectedVoice: adamVoice,
                 libraryRepository: repository,
+                playbackSpeed: 0.5,
               );
             },
           ),
@@ -308,6 +309,7 @@ void main() {
     expect(synthesis.synthesizeVoiceIds, ['Thái Sơn']);
     expect(synthesis.synthesizeTexts, ['Xin chào, đây là giọng đọc mẫu.']);
     expect(playback.playedPaths, [sourceWav.path]);
+    expect(playback.playbackRates, [1.0]);
     expect(find.text('Playing voice preview...'), findsOneWidget);
 
     await tester.tap(

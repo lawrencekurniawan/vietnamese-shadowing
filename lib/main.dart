@@ -569,6 +569,7 @@ class _HomePageState extends State<HomePage> {
 
       await _playWavPath(
         result.path,
+        playbackSpeed: 1.0,
         repeatCount: 1,
         paddingSeconds: 0,
         pauseUsesAudioLength: false,
