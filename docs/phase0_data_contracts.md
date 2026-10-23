@@ -31,6 +31,10 @@ vieneu/
     <uuid>/
       metadata.json
       audio.wav
+  practice/
+    <uuid>/
+      metadata.json
+      audio.wav
 ```
 
 `library/<uuid>/audio.wav` is the durable audio reference. A library item must
@@ -62,6 +66,25 @@ optionally `duration_seconds`.
 Serialization validates the version, UUID, non-empty text/title, UTC timestamp,
 audio file name, voice fields, and audio format. Unknown local metadata versions
 are rejected.
+
+## Practice take metadata
+
+Practice recordings live under `Application Support/vieneu/practice/<uuid>/`.
+Each take uses schema version `1` and contains:
+
+- `schema_version`: integer, currently `1`
+- `take_id`: local UUID v4, also the directory name
+- `library_item_id`: UUID of the source library item
+- `item_title`: snapshot of the source title
+- `created_at_utc`: ISO-8601 UTC timestamp ending in `Z`
+- `audio`: WAV format metadata
+- `audio_bytes`: exact byte length of `audio.wav`
+- `audio_sha256`: lowercase SHA-256 checksum of `audio.wav`
+
+The fixed audio filename is `audio.wav`; recordings are 44.1 kHz, mono, 16-bit
+linear PCM WAV. A take remains valid if its source library item is later renamed
+or deleted. Unknown versions, invalid UUIDs/checksums, and audio format or
+duration mismatches are rejected.
 
 ## `.vshadow` package contract
 

@@ -1,7 +1,7 @@
 import 'playback_session.dart';
 
-/// Owns the single active playback session shared by the Generate and Library
-/// tabs.
+/// Owns the single active playback session shared by the Generate, Library, and
+/// Practice tabs.
 class PlaybackController {
   PlaybackController({
     required WavDurationReader wavDurationReader,

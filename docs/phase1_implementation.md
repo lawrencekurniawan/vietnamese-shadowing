@@ -85,9 +85,9 @@ Application Support/vieneu/library/<local-uuid>/
 - Delete removes the item directory and its durable audio.
 
 `lib/playback/playback_controller.dart` owns the single active
-`PlaybackSession`. The Generate and Library tabs use one controller and are held
-in an `IndexedStack`, so changing tabs does not recreate playback state or start
-a competing player.
+`PlaybackSession`. The Generate, Library, and Practice tabs use one controller
+and are held in an `IndexedStack`, so changing tabs does not recreate playback
+state or start a competing player.
 
 The Library tab supports:
 
@@ -102,6 +102,38 @@ The Library tab supports:
 - Restore a `.vshadowbackup` file
 
 Deleting the currently playing item stops playback before removing its audio.
+
+## Practice tab and recording
+
+The dedicated Practice tab records short shadowing takes against a saved
+library item:
+
+```text
+Application Support/vieneu/practice/<take-uuid>/
+  metadata.json
+  audio.wav
+```
+
+- A take snapshots the library item UUID and title, so it remains playable if
+  the original item is later renamed or deleted.
+- `metadata.json` stores schema version 1, the take and item UUIDs, creation
+  time, WAV format/duration, audio byte length, and a SHA-256 checksum.
+- Saves are staged in a temporary directory and installed with a directory
+  rename. Existing take IDs are never overwritten.
+- One corrupt take is skipped while listing without hiding other recordings.
+- Takes are listed newest first and can be played back or deleted.
+
+`PracticeRecordingBridge` in `ios/Runner/AppDelegate.swift` uses
+`AVAudioRecorder` and requests microphone permission on first use. Recordings
+are 44.1 kHz, mono, 16-bit linear PCM WAV. `NSMicrophoneUsageDescription` is
+declared in `ios/Runner/Info.plist`. Recording is a foreground action; leaving
+the app stops and saves the current take, and there is no background recording
+session.
+
+The Practice tab plays the original with the current Generate settings and
+plays takes at 1x for a direct comparison. Both use the shared playback owner,
+so starting one source stops or blocks the other rather than creating competing
+players.
 
 ## `.vshadow` packages
 
@@ -153,12 +185,14 @@ File handling:
 ## Full-library backup
 
 `lib/library/vshadow_backup.dart` defines a versioned `.vshadowbackup`
-container. The archive contains:
+container. Schema version 2 contains:
 
 ```text
 backup.json
 items/<item-uuid>/metadata.json
 items/<item-uuid>/audio.wav
+practice/<take-uuid>/metadata.json
+practice/<take-uuid>/audio.wav
 ```
 
 `backup.json` stores:
@@ -167,22 +201,28 @@ items/<item-uuid>/audio.wav
 - Default voice stable ID and preset name
 - Playback speed, repeat count, pause duration, and pause mode
 - The ordered list of item UUIDs
+- The ordered list of practice take UUIDs
 
 Each item uses the same portable `VshadowMetadata` and WAV payload validation as
-a `.vshadow` package, including voice identity and SHA-256 checksum checks. The
-backup limit is 512 MiB, the manifest limit is 2 MiB, and one backup may contain
-up to 500 items. Individual item metadata and audio limits match `.vshadow`.
+a `.vshadow` package, including voice identity and SHA-256 checksum checks. Each
+practice take uses `PracticeTakeMetadata` validation, including WAV format,
+duration, byte length, and SHA-256 checksum checks. The backup limit is 512 MiB
+of audio, the manifest limit is 2 MiB, and one backup may contain up to 500
+items and 500 practice takes. Individual item metadata and audio limits match
+`.vshadow`.
 
 Restore behavior:
 
-- The entire archive, manifest, settings, and every item are validated before
+- The entire archive, manifest, settings, items, and takes are validated before
   the first install.
-- Backup item IDs are preserved.
-- An item whose ID already exists is skipped, never overwritten, so retrying an
-  interrupted restore is idempotent.
+- Backup item and take IDs are preserved.
+- An item or take whose ID already exists is skipped, never overwritten, so
+  retrying an interrupted restore is idempotent.
 - Restored playback and voice settings are applied and persisted.
 - A voice saved by an older release falls back to the curated default when it
   is no longer offered by the Generate tab.
+- Schema version 1 backups are accepted as item/settings-only backups. A
+  version 1 manifest that declares practice takes is rejected.
 
 Cloud storage uses the iOS Files document flow rather than an iCloud
 entitlement:
@@ -197,7 +237,27 @@ entitlement:
 - This works with sideloaded builds and free provisioning, where iCloud
   container entitlements may be unavailable.
 
-No background iCloud sync or OAuth-based Google Drive integration is included.
+### Automatic backup
+
+`lib/backup/backup_folder_service.dart` and `BackupFolderBridge` in
+`ios/Runner/AppDelegate.swift` implement a folder chooser and persist the chosen
+folder as a security-scoped bookmark. `lib/backup/auto_backup_service.dart`
+exports the same schema 2 payload and writes one rolling file:
+
+```text
+<chosen folder>/vshadow-autobackup.vshadowbackup
+```
+
+The rolling file is refreshed about three seconds after library, settings, or
+practice-take changes and once on launch when automatic backup is enabled. If a
+change happens while an export is running, one follow-up export is scheduled.
+Native writes use `NSFileCoordinator` so file-provider folders can replace the
+existing file safely. Manual backups keep their timestamped names and are never
+overwritten by the automatic file.
+
+There is no background iCloud sync or OAuth-based Google Drive integration.
+Automatic backup runs while the app is active and requires the selected folder
+to remain available.
 
 ## Validation
 
@@ -207,8 +267,10 @@ Automated:
   curated voices in the Generate flow, voice preview, WAV names, playback, the
   worker protocol, durable storage, cache independence, package validation,
   import safety, export/import round trips, backup validation, idempotent
-  restore, settings, and filenames.
-- `flutter test --timeout 90s` passes all 108 tests.
+  restore, settings, filenames, practice storage, recording channel behavior,
+  practice-take backup/restore, version 1 compatibility, automatic backup
+  export/write, and the automatic-backup folder toggle.
+- `flutter test --timeout 90s` passes all automated tests.
 - `flutter analyze` reports only `avoid_print` findings.
 - `flutter build ios --simulator` succeeds.
 
@@ -219,18 +281,24 @@ Simulator:
   `new_with_ort() COMPLETE`.
 - Voices, G2P, and all ONNX sessions initialize inside the worker.
 - The Generate tab shows the curated `Nam · male · Adam` voice and the voice
-  Preview control; Generate/Library navigation is visible.
-- Library actions and `.vshadow` file-picking dialogs require interactive UI
-  exercise; they are covered by repository and package-service tests rather than
-  claimed as manually tapped flows.
+  Preview control; Generate/Library/Practice navigation is visible.
+- Library actions, `.vshadow` file-picking dialogs, automatic-backup folder
+  selection, and microphone recording require interactive exercise; they are
+  covered by repository, service, channel, and widget tests rather than claimed
+  as manually tapped device flows.
 
 ## Known limitations
 
 - Native synthesis cannot be cancelled mid-inference.
 - Package, backup, and audio decoding are in-memory; a future version may stream
   large files. The current backup cap is 512 MiB.
-- Backups are manual and stored wherever the user chooses in Files. There is no
-  automatic iCloud or Google Drive sync.
+- Automatic backup is not background sync. It refreshes while the app is active,
+  and a revoked or moved folder may require choosing the folder again.
+- Practice takes are full PCM WAV recordings. They are simple and backup-safe
+  but larger than compressed recordings; there is no waveform editor, trim, or
+  partial retake yet.
+- Recording is foreground-only; leaving the app stops and saves the current
+  take instead of continuing in the background.
 - Backups are ZIP containers without encryption; the checksum verifies
   integrity, not authenticity or confidentiality.
 - The native Files/Finder document-open bridge compiles and has Dart channel

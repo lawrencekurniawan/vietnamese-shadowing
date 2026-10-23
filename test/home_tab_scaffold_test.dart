@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vietnamese_shadowing/ui/home_tab_scaffold.dart';
 
 void main() {
-  testWidgets('keeps both tabs alive while switching', (tester) async {
+  testWidgets('keeps all tabs alive while switching', (tester) async {
     var selectedTab = 0;
 
     await tester.pumpWidget(
@@ -26,6 +26,11 @@ void main() {
                 key: ValueKey<String>('library-child'),
                 countKey: ValueKey<String>('library-count'),
                 buttonKey: ValueKey<String>('library-increment'),
+              ),
+              practiceTab: const _Counter(
+                key: ValueKey<String>('practice-child'),
+                countKey: ValueKey<String>('practice-count'),
+                buttonKey: ValueKey<String>('practice-increment'),
               ),
               isPlaying: false,
               onStopPlayback: () {},
@@ -63,6 +68,22 @@ void main() {
 
     expect(_indexedStack(tester).index, 1);
     expect(_counterText(tester, 'library-count'), '1');
+
+    await tester.tap(find.byKey(HomeTabScaffold.practiceTabKey));
+    await tester.pump();
+
+    expect(_indexedStack(tester).index, 2);
+    expect(find.widgetWithText(AppBar, 'Practice'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey<String>('practice-increment')));
+    await tester.pump();
+    expect(_counterText(tester, 'practice-count'), '1');
+
+    await tester.tap(find.byKey(HomeTabScaffold.libraryTabKey));
+    await tester.pump();
+
+    expect(_indexedStack(tester).index, 1);
+    expect(_counterText(tester, 'library-count'), '1');
   });
 
   testWidgets('exposes a global stop action while audio is playing', (
@@ -77,6 +98,7 @@ void main() {
           onTabSelected: (_) {},
           generateTab: const SizedBox.shrink(),
           libraryTab: const SizedBox.shrink(),
+          practiceTab: const SizedBox.shrink(),
           isPlaying: true,
           onStopPlayback: () {
             stops++;

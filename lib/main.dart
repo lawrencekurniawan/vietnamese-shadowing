@@ -3,6 +3,8 @@ import 'package:flutter/services.dart';
 
 import 'app/home_page_environment.dart';
 import 'app/preference_store.dart';
+import 'backup/auto_backup_service.dart';
+import 'backup/backup_folder_service.dart';
 import 'documents/document_open_service.dart';
 import 'native/synthesis_service.dart';
 import 'native/vieneu_asset_stager.dart';
@@ -26,6 +28,9 @@ import 'native/vieneu_ffi.dart';
 import 'native/vieneu_synthesis_worker.dart';
 import 'playback/playback_controller.dart';
 import 'playback/playback_session.dart';
+import 'practice/practice_recording_service.dart';
+import 'practice/practice_repository.dart';
+import 'practice/practice_take_metadata.dart';
 import 'ui/home_tab_scaffold.dart';
 import 'ui/library_item_card.dart';
 import 'voices/voice_identity.dart';
@@ -66,7 +71,7 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   static const String _defaultVoiceIdPreferenceKey = 'vieneu_default_voice_id';
 
   static const String _defaultVoicePreferenceKey = 'vieneu_default_voice';
@@ -79,6 +84,15 @@ class _HomePageState extends State<HomePage> {
 
   static const String _pauseUsesAudioLengthPreferenceKey =
       'vieneu_pause_uses_audio_length';
+
+  static const String _autoBackupEnabledPreferenceKey =
+      'vshadow_auto_backup_enabled';
+
+  static const String _autoBackupFolderNamePreferenceKey =
+      'vshadow_auto_backup_folder_name';
+
+  static const String _autoBackupLastSuccessPreferenceKey =
+      'vshadow_auto_backup_last_success_utc';
 
   static const String _vshadowUniformTypeIdentifier =
       'com.example.vietnameseshadowing.vshadow';
@@ -124,6 +138,26 @@ class _HomePageState extends State<HomePage> {
   bool _isBackupBusy = false;
   String? _libraryError;
 
+  late final BackupFolderService _backupFolderService;
+  Timer? _autoBackupTimer;
+  bool _autoBackupAvailable = true;
+  bool _autoBackupEnabled = false;
+  bool _autoBackupBusy = false;
+  bool _autoBackupPending = false;
+  String? _autoBackupFolderName;
+  String? _autoBackupMessage;
+  DateTime? _autoBackupLastSuccessUtc;
+
+  late final PracticeRecorder _practiceRecorder;
+  PracticeRepository? _practiceRepository;
+  List<PracticeTakeMetadata> _practiceTakes = const [];
+  String? _selectedPracticeItemId;
+  bool _isPracticeLoading = false;
+  bool _isRecording = false;
+  bool _isSavingTake = false;
+  String? _practiceError;
+  String _practiceStatus = 'Ready to practice.';
+
   double _playbackSpeed = 1.0;
   int _repeatCount = 1;
   double _paddingSeconds = 0.5;
@@ -135,12 +169,21 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
 
+    WidgetsBinding.instance.addObserver(this);
+
     _tts = widget.environment?.synthesisService ?? VieNeuSynthesisWorker();
 
     _playbackController = PlaybackController(
       wavDurationReader: _getWavDurationSeconds,
       audioFactory: widget.environment?.playbackAudioFactory,
     );
+
+    _backupFolderService =
+        widget.environment?.backupFolderService ??
+        PlatformBackupFolderService();
+
+    _practiceRecorder =
+        widget.environment?.practiceRecorder ?? PlatformPracticeRecorder();
 
     _documentOpenService = DocumentOpenService();
     _documentOpenService.setHandler(_handleExternalDocument);
@@ -149,6 +192,18 @@ class _HomePageState extends State<HomePage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initialize();
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final leavingForeground =
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden;
+
+    if (leavingForeground && _isRecording && !_isSavingTake) {
+      unawaited(_stopPracticeRecording());
+    }
   }
 
   Future<void> _initialize() async {
@@ -189,12 +244,22 @@ class _HomePageState extends State<HomePage> {
           );
           _libraryError = data.libraryError;
 
+          _practiceRepository = data.practiceRepository;
+          _practiceTakes = List<PracticeTakeMetadata>.unmodifiable(
+            data.practiceTakes,
+          );
+          _practiceError = data.practiceError;
+          _selectedPracticeItemId = data.libraryItems.isEmpty
+              ? null
+              : data.libraryItems.first.itemId;
+
           _selectedTab = data.initialTab;
           _isInitializing = false;
           _status = data.status;
         });
 
         await _drainPendingExternalDocument();
+        await _loadAutoBackupSettings();
         return;
       }
 
@@ -336,6 +401,24 @@ class _HomePageState extends State<HomePage> {
         libraryError = 'Library unavailable: $error';
       }
 
+      PracticeRepository? practiceRepository;
+      List<PracticeTakeMetadata> practiceTakes = const [];
+      String? practiceError;
+
+      try {
+        practiceRepository = await PracticeRepository.open(
+          applicationSupportDirectory: applicationSupportDirectory,
+        );
+
+        practiceTakes = await practiceRepository.list();
+
+        debugPrint('VieNeu: loaded ${practiceTakes.length} practice takes.');
+      } catch (error, stackTrace) {
+        debugPrint('VieNeu: practice initialization failed: $error');
+        debugPrint('$stackTrace');
+        practiceError = 'Practice storage unavailable: $error';
+      }
+
       if (!mounted) {
         return;
       }
@@ -354,6 +437,13 @@ class _HomePageState extends State<HomePage> {
         _libraryItems = libraryItems;
         _libraryError = libraryError;
 
+        _practiceRepository = practiceRepository;
+        _practiceTakes = List<PracticeTakeMetadata>.unmodifiable(practiceTakes);
+        _practiceError = practiceError;
+        _selectedPracticeItemId = libraryItems.isEmpty
+            ? null
+            : libraryItems.first.itemId;
+
         _isInitializing = false;
         _status = 'Native engine ready';
       });
@@ -361,6 +451,7 @@ class _HomePageState extends State<HomePage> {
       print('VieNeu: initialization complete.');
 
       await _drainPendingExternalDocument();
+      await _loadAutoBackupSettings();
     } catch (e, stackTrace) {
       print('');
       print('========================================');
@@ -874,6 +965,8 @@ class _HomePageState extends State<HomePage> {
       print('VieNeu: failed to save default voice: $error');
       print(stackTrace);
     }
+
+    _scheduleAutoBackup();
   }
 
   Future<void> _downloadGeneratedAudio() async {
@@ -1103,6 +1196,7 @@ class _HomePageState extends State<HomePage> {
     final imported = await service.importBytes(bytes);
 
     await _refreshLibrary();
+    _scheduleAutoBackup();
 
     if (!mounted) {
       return;
@@ -1215,6 +1309,310 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  VshadowBackupSettings _currentBackupSettings() {
+    final voice = _selectedVoice;
+
+    return VshadowBackupSettings(
+      defaultVoiceStableId: voice?.stableId,
+      defaultVoicePresetName: voice?.name,
+      playbackSpeed: _playbackSpeed,
+      repeatCount: _repeatCount,
+      paddingSeconds: _paddingSeconds,
+      pauseUsesAudioLength: _pauseUsesAudioLength,
+    );
+  }
+
+  Future<void> _loadAutoBackupSettings() async {
+    var enabled = false;
+    String? folderName;
+    DateTime? lastSuccess;
+
+    try {
+      enabled =
+          await _preferences.getBool(_autoBackupEnabledPreferenceKey) ?? false;
+      folderName = await _preferences.getString(
+        _autoBackupFolderNamePreferenceKey,
+      );
+
+      final lastSuccessRaw = await _preferences.getString(
+        _autoBackupLastSuccessPreferenceKey,
+      );
+
+      lastSuccess = lastSuccessRaw == null
+          ? null
+          : DateTime.tryParse(lastSuccessRaw)?.toUtc();
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: failed to load automatic backup settings: $error');
+      debugPrint('$stackTrace');
+    }
+
+    var available = true;
+    var folderLookupFailed = false;
+    String? message;
+    BackupFolderInfo? folder;
+
+    try {
+      folder = await _backupFolderService.getFolder();
+    } on MissingPluginException {
+      available = false;
+      folderLookupFailed = true;
+      message =
+          'Automatic backup folder access is only available on iOS. '
+          'Use Back Up on other platforms.';
+    } catch (error, stackTrace) {
+      folderLookupFailed = true;
+      debugPrint('VieNeu: failed to resolve backup folder: $error');
+      debugPrint('$stackTrace');
+      message = 'Backup folder unavailable: $error';
+    }
+
+    if (folder != null) {
+      folderName = folder.name;
+
+      try {
+        await _preferences.setString(
+          _autoBackupFolderNamePreferenceKey,
+          folder.name,
+        );
+      } catch (_) {
+        // The folder itself is still usable for this session.
+      }
+    } else if (!folderLookupFailed) {
+      folderName = null;
+
+      if (enabled && available) {
+        message = 'Automatic backup needs a folder. Choose one again.';
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _autoBackupAvailable = available;
+      _autoBackupEnabled = enabled;
+      _autoBackupFolderName = folderName;
+      _autoBackupLastSuccessUtc = lastSuccess;
+      _autoBackupMessage = message;
+    });
+
+    if (enabled && folder != null) {
+      _scheduleAutoBackup(immediate: true);
+    }
+  }
+
+  Future<void> _toggleAutoBackup(bool enabled) async {
+    if (!_autoBackupAvailable) {
+      _showStatus('Automatic backup is unavailable on this platform.');
+      return;
+    }
+
+    if (enabled && _autoBackupFolderName == null) {
+      final selected = await _chooseAutoBackupFolder();
+
+      if (!selected) {
+        return;
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _autoBackupEnabled = enabled;
+        _autoBackupMessage = enabled
+            ? 'Automatic backup is on.'
+            : 'Automatic backup is off.';
+      });
+    }
+
+    try {
+      await _preferences.setBool(_autoBackupEnabledPreferenceKey, enabled);
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: failed to save automatic backup setting: $error');
+      debugPrint('$stackTrace');
+    }
+
+    if (enabled) {
+      _scheduleAutoBackup(immediate: true);
+    } else {
+      _autoBackupTimer?.cancel();
+      _autoBackupTimer = null;
+    }
+  }
+
+  Future<bool> _chooseAutoBackupFolder() async {
+    try {
+      final folder = await _backupFolderService.chooseFolder();
+
+      if (folder == null) {
+        if (mounted) {
+          setState(() {
+            _autoBackupMessage = 'No backup folder selected.';
+          });
+        }
+        return false;
+      }
+
+      try {
+        await _preferences.setString(
+          _autoBackupFolderNamePreferenceKey,
+          folder.name,
+        );
+      } catch (error, stackTrace) {
+        debugPrint('VieNeu: failed to save backup folder name: $error');
+        debugPrint('$stackTrace');
+      }
+
+      if (!mounted) {
+        return true;
+      }
+
+      setState(() {
+        _autoBackupAvailable = true;
+        _autoBackupFolderName = folder.name;
+        _autoBackupMessage =
+            'Automatic backups will be saved in ${folder.name}.';
+      });
+
+      if (_autoBackupEnabled) {
+        _scheduleAutoBackup(immediate: true);
+      }
+
+      return true;
+    } on MissingPluginException {
+      if (mounted) {
+        setState(() {
+          _autoBackupAvailable = false;
+          _autoBackupMessage =
+              'Automatic backup folder access is only available on iOS.';
+        });
+      }
+      return false;
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: failed to choose backup folder: $error');
+      debugPrint('$stackTrace');
+
+      if (mounted) {
+        setState(() {
+          _autoBackupMessage = 'Could not choose backup folder: $error';
+        });
+      }
+
+      return false;
+    }
+  }
+
+  void _scheduleAutoBackup({bool immediate = false}) {
+    if (!_autoBackupEnabled || !_autoBackupAvailable) {
+      return;
+    }
+
+    if (_autoBackupBusy) {
+      _autoBackupPending = true;
+      return;
+    }
+
+    _autoBackupTimer?.cancel();
+    _autoBackupTimer = Timer(
+      immediate ? Duration.zero : const Duration(seconds: 3),
+      () {
+        _autoBackupTimer = null;
+        unawaited(_runAutoBackup());
+      },
+    );
+  }
+
+  Future<void> _runAutoBackup() async {
+    if (!_autoBackupEnabled || !_autoBackupAvailable) {
+      return;
+    }
+
+    if (_autoBackupBusy) {
+      _autoBackupPending = true;
+      return;
+    }
+
+    final repository = _libraryRepository;
+
+    if (repository == null) {
+      return;
+    }
+
+    if (_autoBackupFolderName == null) {
+      if (mounted) {
+        setState(() {
+          _autoBackupMessage = 'Automatic backup needs a folder.';
+        });
+      }
+      return;
+    }
+
+    setState(() {
+      _autoBackupBusy = true;
+      _autoBackupMessage = 'Saving automatic backup...';
+    });
+
+    try {
+      final service = AutoBackupService(
+        repository: repository,
+        practiceRepository: _practiceRepository,
+        folderService: _backupFolderService,
+      );
+      final result = await service.run(
+        items: _libraryItems,
+        settings: _currentBackupSettings(),
+        takes: _practiceTakes,
+      );
+
+      try {
+        await _preferences.setString(
+          _autoBackupLastSuccessPreferenceKey,
+          result.completedAtUtc.toIso8601String(),
+        );
+      } catch (error, stackTrace) {
+        debugPrint('VieNeu: failed to save automatic backup timestamp: $error');
+        debugPrint('$stackTrace');
+      }
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _autoBackupLastSuccessUtc = result.completedAtUtc;
+        _autoBackupMessage = 'Automatic backup saved as ${result.fileName}.';
+      });
+    } on MissingPluginException {
+      if (mounted) {
+        setState(() {
+          _autoBackupAvailable = false;
+          _autoBackupMessage =
+              'Automatic backup folder access is only available on iOS.';
+        });
+      }
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: automatic backup failed: $error');
+      debugPrint('$stackTrace');
+
+      if (mounted) {
+        setState(() {
+          _autoBackupMessage = 'Automatic backup failed: $error';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _autoBackupBusy = false;
+        });
+      }
+
+      if (_autoBackupPending) {
+        _autoBackupPending = false;
+        _scheduleAutoBackup();
+      }
+    }
+  }
+
   Future<void> _exportLibraryBackup() async {
     final repository = _libraryRepository;
 
@@ -1233,19 +1631,15 @@ class _HomePageState extends State<HomePage> {
     });
 
     try {
-      final voice = _selectedVoice;
-      final settings = VshadowBackupSettings(
-        defaultVoiceStableId: voice?.stableId,
-        defaultVoicePresetName: voice?.name,
-        playbackSpeed: _playbackSpeed,
-        repeatCount: _repeatCount,
-        paddingSeconds: _paddingSeconds,
-        pauseUsesAudioLength: _pauseUsesAudioLength,
+      final settings = _currentBackupSettings();
+      final service = VshadowBackupService(
+        repository: repository,
+        practiceRepository: _practiceRepository,
       );
-      final service = VshadowBackupService(repository: repository);
       final bytes = await service.exportBackup(
         items: _libraryItems,
         settings: settings,
+        takes: _practiceTakes,
       );
       final suggestedName = buildVshadowBackupFilename(
         exportedAt: DateTime.now(),
@@ -1392,10 +1786,14 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    final service = VshadowBackupService(repository: repository);
+    final service = VshadowBackupService(
+      repository: repository,
+      practiceRepository: _practiceRepository,
+    );
     final result = await service.importBackup(bytes);
 
     await _refreshLibrary();
+    await _refreshPracticeTakes();
     await _applyBackupSettings(result.manifest.settings);
 
     if (!mounted) {
@@ -1403,14 +1801,20 @@ class _HomePageState extends State<HomePage> {
     }
 
     final restoredCount = result.importedCount + result.skippedCount;
+    final restoredTakeCount =
+        result.importedTakeCount + result.skippedTakeCount;
 
     setState(() {
-      if (restoredCount == 0) {
-        _status = 'Backup restored. This backup has no saved audio.';
+      if (restoredCount == 0 && restoredTakeCount == 0) {
+        _status =
+            'Backup restored. This backup has no saved audio or practice '
+            'takes.';
       } else {
         _status =
-            'Backup restored: ${result.importedCount} imported, '
-            '${result.skippedCount} already present.';
+            'Backup restored: ${result.importedCount} audio imported, '
+            '${result.skippedCount} audio already present, '
+            '${result.importedTakeCount} takes imported, '
+            '${result.skippedTakeCount} takes already present.';
       }
       _selectedTab = 1;
     });
@@ -1476,6 +1880,8 @@ class _HomePageState extends State<HomePage> {
       debugPrint('VieNeu: failed to persist restored backup settings: $error');
       debugPrint('$stackTrace');
     }
+
+    _scheduleAutoBackup();
   }
 
   void _reportBackupFailure(Object error, StackTrace stackTrace) {
@@ -1515,6 +1921,13 @@ class _HomePageState extends State<HomePage> {
         _libraryItems = items;
         _libraryError = null;
         _isLibraryLoading = false;
+
+        final selectedPracticeItemId = _selectedPracticeItemId;
+
+        if (selectedPracticeItemId == null ||
+            !items.any((item) => item.itemId == selectedPracticeItemId)) {
+          _selectedPracticeItemId = items.isEmpty ? null : items.first.itemId;
+        }
       });
     } catch (error, stackTrace) {
       debugPrint('VieNeu: library refresh failed: $error');
@@ -1592,6 +2005,7 @@ class _HomePageState extends State<HomePage> {
       });
 
       await _refreshLibrary();
+      _scheduleAutoBackup();
     } catch (error, stackTrace) {
       debugPrint('VieNeu: save to library failed: $error');
       debugPrint('$stackTrace');
@@ -1650,6 +2064,7 @@ class _HomePageState extends State<HomePage> {
     try {
       await repository.rename(item.itemId, title);
       await _refreshLibrary();
+      _scheduleAutoBackup();
 
       if (!mounted) {
         return;
@@ -1716,6 +2131,7 @@ class _HomePageState extends State<HomePage> {
 
       await repository.delete(item.itemId);
       await _refreshLibrary();
+      _scheduleAutoBackup();
 
       if (!mounted) {
         return;
@@ -1780,6 +2196,600 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _status = message;
     });
+  }
+
+  LibraryItemMetadata? get _selectedPracticeItem {
+    final selectedId = _selectedPracticeItemId;
+
+    if (selectedId == null) {
+      return null;
+    }
+
+    for (final item in _libraryItems) {
+      if (item.itemId == selectedId) {
+        return item;
+      }
+    }
+
+    return null;
+  }
+
+  Future<void> _refreshPracticeTakes() async {
+    final repository = _practiceRepository;
+
+    if (repository == null) {
+      return;
+    }
+
+    setState(() {
+      _isPracticeLoading = true;
+    });
+
+    try {
+      final takes = await repository.list();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _practiceTakes = takes;
+        _practiceError = null;
+        _isPracticeLoading = false;
+      });
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: practice refresh failed: $error');
+      debugPrint('$stackTrace');
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _practiceError = 'Practice refresh failed: $error';
+        _isPracticeLoading = false;
+      });
+    }
+  }
+
+  Future<void> _playPracticeOriginal() async {
+    final repository = _libraryRepository;
+    final item = _selectedPracticeItem;
+
+    if (repository == null || item == null) {
+      setState(() {
+        _practiceStatus = 'Choose a saved library item first.';
+      });
+      return;
+    }
+
+    final path = repository.audioFile(item.itemId).path;
+
+    if (!await File(path).exists()) {
+      if (mounted) {
+        setState(() {
+          _practiceStatus = 'The original audio is missing.';
+        });
+      }
+      return;
+    }
+
+    await _playWavPath(path, playingStatus: 'Playing original...');
+  }
+
+  Future<void> _playPracticeTake(PracticeTakeMetadata take) async {
+    final repository = _practiceRepository;
+
+    if (repository == null) {
+      return;
+    }
+
+    final path = repository.audioFile(take.takeId).path;
+
+    if (!await File(path).exists()) {
+      if (mounted) {
+        setState(() {
+          _practiceStatus = 'That take audio is missing.';
+        });
+      }
+      return;
+    }
+
+    await _playWavPath(
+      path,
+      playbackSpeed: 1.0,
+      repeatCount: 1,
+      paddingSeconds: 0,
+      pauseUsesAudioLength: false,
+      playingStatus: 'Playing your take...',
+    );
+  }
+
+  Future<void> _togglePracticeRecording() async {
+    if (_isSavingTake) {
+      return;
+    }
+
+    if (_isRecording) {
+      await _stopPracticeRecording();
+    } else {
+      await _startPracticeRecording();
+    }
+  }
+
+  Future<void> _startPracticeRecording() async {
+    final item = _selectedPracticeItem;
+
+    if (item == null) {
+      setState(() {
+        _practiceStatus = 'Choose a saved library item first.';
+      });
+      return;
+    }
+
+    if (_isPlaying) {
+      await _stopPlayback();
+    }
+
+    setState(() {
+      _isSavingTake = true;
+      _practiceStatus = 'Requesting microphone...';
+    });
+
+    try {
+      await _practiceRecorder.start();
+
+      if (!mounted) {
+        await _practiceRecorder.cancel();
+        return;
+      }
+
+      setState(() {
+        _isRecording = true;
+        _isSavingTake = false;
+        _practiceStatus = 'Recording. Tap Stop & Save when finished.';
+      });
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: practice recording failed to start: $error');
+      debugPrint('$stackTrace');
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isRecording = false;
+        _isSavingTake = false;
+        _practiceStatus = 'Recording failed: $error';
+      });
+    }
+  }
+
+  Future<void> _stopPracticeRecording() async {
+    final repository = _practiceRepository;
+    final item = _selectedPracticeItem;
+
+    if (repository == null || item == null) {
+      await _practiceRecorder.cancel();
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isSavingTake = false;
+          _practiceStatus = 'Practice storage is unavailable.';
+        });
+      }
+      return;
+    }
+
+    setState(() {
+      _isSavingTake = true;
+      _practiceStatus = 'Saving your take...';
+    });
+
+    PracticeRecordingResult? result;
+
+    try {
+      result = await _practiceRecorder.stop();
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: practice recording failed to stop: $error');
+      debugPrint('$stackTrace');
+
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isSavingTake = false;
+          _practiceStatus = 'Could not stop recording: $error';
+        });
+      }
+      return;
+    }
+
+    if (result == null) {
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isSavingTake = false;
+          _practiceStatus = 'No recording was captured.';
+        });
+      }
+      return;
+    }
+
+    try {
+      await repository.saveFromWavFile(
+        libraryItemId: item.itemId,
+        itemTitle: item.title,
+        sourceWavPath: result.path,
+      );
+
+      await _refreshPracticeTakes();
+      _scheduleAutoBackup();
+
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isSavingTake = false;
+          _practiceStatus = 'Saved a take for ${item.title}.';
+        });
+      }
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: saving practice take failed: $error');
+      debugPrint('$stackTrace');
+
+      if (mounted) {
+        setState(() {
+          _isRecording = false;
+          _isSavingTake = false;
+          _practiceStatus = 'Could not save take: $error';
+        });
+      }
+    } finally {
+      unawaited(_deletePracticeRecordingFile(result.path));
+    }
+  }
+
+  Future<void> _deletePracticeRecordingFile(String path) async {
+    try {
+      await File(path).delete();
+    } on FileSystemException {
+      // The temporary recording may already have been removed.
+    }
+  }
+
+  Future<void> _deletePracticeTake(PracticeTakeMetadata take) async {
+    final repository = _practiceRepository;
+
+    if (repository == null) {
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Delete Practice Take'),
+          content: Text(
+            'Delete this take from "${take.itemTitle}"? '
+            'This cannot be undone.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Delete'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) {
+      return;
+    }
+
+    try {
+      if (_playbackController.currentPath ==
+          repository.audioFile(take.takeId).path) {
+        await _stopPlayback();
+      }
+
+      await repository.delete(take.takeId);
+      await _refreshPracticeTakes();
+      _scheduleAutoBackup();
+
+      if (mounted) {
+        setState(() {
+          _practiceStatus = 'Deleted practice take.';
+        });
+      }
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: delete practice take failed: $error');
+      debugPrint('$stackTrace');
+
+      if (mounted) {
+        setState(() {
+          _practiceStatus = 'Delete failed: $error';
+        });
+      }
+    }
+  }
+
+  String _formatLocalDateTime(DateTime value) {
+    final local = value.toLocal();
+    final month = local.month.toString().padLeft(2, '0');
+    final day = local.day.toString().padLeft(2, '0');
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+
+    return '${local.year}-$month-$day $hour:$minute';
+  }
+
+  String _formatPracticeDuration(PracticeTakeMetadata take) {
+    final duration = take.audio.durationSeconds;
+
+    if (duration == null) {
+      return '';
+    }
+
+    return '${duration.toStringAsFixed(1)} s';
+  }
+
+  Widget _buildPracticeTab(BuildContext context) {
+    final repository = _practiceRepository;
+
+    if (repository == null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Text(
+            _practiceError ?? 'Practice storage is unavailable.',
+            textAlign: TextAlign.center,
+            style: Theme.of(context).textTheme.bodyLarge,
+          ),
+        ),
+      );
+    }
+
+    final selectedItem = _selectedPracticeItem;
+    final canRecord =
+        selectedItem != null && !_isSavingTake && !_isPracticeLoading;
+
+    return RefreshIndicator(
+      onRefresh: _refreshPracticeTakes,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(20),
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Practice',
+                  style: Theme.of(context).textTheme.headlineSmall,
+                ),
+              ),
+              if (_isPracticeLoading)
+                const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(_practiceStatus, style: Theme.of(context).textTheme.bodyMedium),
+          const SizedBox(height: 12),
+          if (_libraryItems.isEmpty)
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  children: [
+                    const Icon(Icons.library_music_outlined, size: 36),
+                    const SizedBox(height: 8),
+                    const Text('No library audio to practice yet.'),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Generate audio and save it to the Library first.',
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+            )
+          else ...[
+            KeyedSubtree(
+              key: ValueKey<String>(
+                'practice-item-dropdown-state-${selectedItem?.itemId}',
+              ),
+              child: DropdownButtonFormField<String>(
+                key: const ValueKey<String>('practice-item-dropdown'),
+                initialValue: selectedItem?.itemId,
+                decoration: const InputDecoration(
+                  labelText: 'Practice this item',
+                  border: OutlineInputBorder(),
+                ),
+                items: [
+                  for (final item in _libraryItems)
+                    DropdownMenuItem<String>(
+                      value: item.itemId,
+                      child: Text(item.title, overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+                onChanged: (value) {
+                  setState(() {
+                    _selectedPracticeItemId = value;
+                    _practiceStatus = 'Ready to practice.';
+                  });
+                },
+              ),
+            ),
+            if (selectedItem != null) ...[
+              const SizedBox(height: 12),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        selectedItem.title,
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        selectedItem.originalText,
+                        maxLines: 4,
+                        overflow: TextOverflow.ellipsis,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                      const SizedBox(height: 12),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            key: const ValueKey<String>(
+                              'practice-play-original',
+                            ),
+                            onPressed: _isPlaying || _isRecording
+                                ? null
+                                : _playPracticeOriginal,
+                            icon: const Icon(Icons.play_arrow, size: 18),
+                            label: const Text('Play Original'),
+                          ),
+                          FilledButton.icon(
+                            key: const ValueKey<String>(
+                              'practice-record-button',
+                            ),
+                            onPressed: canRecord
+                                ? _togglePracticeRecording
+                                : null,
+                            icon: Icon(
+                              _isRecording ? Icons.stop : Icons.mic,
+                              size: 18,
+                            ),
+                            label: Text(
+                              _isRecording ? 'Stop & Save' : 'Record',
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (_isRecording) ...[
+                        const SizedBox(height: 10),
+                        Text(
+                          'Recording…',
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                      if (_isSavingTake) ...[
+                        const SizedBox(height: 12),
+                        const LinearProgressIndicator(),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            Text('Your takes', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 8),
+            if (_practiceTakes.isEmpty)
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Column(
+                    children: [
+                      const Icon(Icons.mic_none, size: 36),
+                      const SizedBox(height: 8),
+                      const Text('No practice takes yet.'),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Choose an item, record yourself, and compare with '
+                        'the original.',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            for (final take in _practiceTakes) ...[
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        take.itemTitle,
+                        style: Theme.of(context).textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '${_formatLocalDateTime(take.createdAtUtc)}'
+                        '${_formatPracticeDuration(take).isEmpty ? '' : ' · ${_formatPracticeDuration(take)}'}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            key: ValueKey<String>(
+                              'practice-play-take-${take.takeId}',
+                            ),
+                            onPressed: _isPlaying || _isRecording
+                                ? null
+                                : () => _playPracticeTake(take),
+                            icon: const Icon(Icons.play_arrow, size: 18),
+                            label: const Text('Play Take'),
+                          ),
+                          TextButton.icon(
+                            key: ValueKey<String>(
+                              'practice-delete-take-${take.takeId}',
+                            ),
+                            onPressed: _isPlaying || _isRecording
+                                ? null
+                                : () => _deletePracticeTake(take),
+                            icon: const Icon(Icons.delete_outline, size: 18),
+                            label: const Text('Delete'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ],
+          if (_practiceError != null) ...[
+            const SizedBox(height: 12),
+            Card(
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  _practiceError!,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onErrorContainer,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   Widget _buildLibraryTab(BuildContext context) {
@@ -1904,10 +2914,79 @@ class _HomePageState extends State<HomePage> {
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Save your library and settings as one file. In the Files '
-                    'sheet, choose iCloud Drive or Google Drive.',
+                    'Save your library, settings, and practice takes as one '
+                    'file. In the Files sheet, choose iCloud Drive or Google '
+                    'Drive.',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
+                  const SizedBox(height: 8),
+                  SwitchListTile(
+                    key: const ValueKey<String>('auto-backup-switch'),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: _autoBackupEnabled,
+                    onChanged: !_autoBackupAvailable || _isBackupBusy
+                        ? null
+                        : _toggleAutoBackup,
+                    title: const Text('Automatic backup'),
+                    subtitle: Text(
+                      !_autoBackupAvailable
+                          ? 'Available on iOS.'
+                          : _autoBackupFolderName == null
+                          ? 'Choose a folder in Files, such as iCloud Drive '
+                                'or Google Drive.'
+                          : 'Writes one rolling file to '
+                                '${_autoBackupFolderName!} after changes.',
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        key: const ValueKey<String>(
+                          'auto-backup-folder-button',
+                        ),
+                        onPressed:
+                            !_autoBackupAvailable ||
+                                _isBackupBusy ||
+                                _isLibraryLoading
+                            ? null
+                            : _chooseAutoBackupFolder,
+                        icon: const Icon(Icons.folder_open, size: 18),
+                        label: Text(
+                          _autoBackupFolderName == null
+                              ? 'Choose Folder'
+                              : 'Change Folder',
+                        ),
+                      ),
+                      if (_autoBackupEnabled)
+                        OutlinedButton.icon(
+                          key: const ValueKey<String>('auto-backup-now-button'),
+                          onPressed: _autoBackupBusy || _isBackupBusy
+                              ? null
+                              : _runAutoBackup,
+                          icon: const Icon(Icons.save_outlined, size: 18),
+                          label: const Text('Back Up Now'),
+                        ),
+                    ],
+                  ),
+                  if (_autoBackupMessage != null) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      _autoBackupMessage!,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                  if (_autoBackupLastSuccessUtc != null) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'Last automatic backup: '
+                      '${_formatLocalDateTime(_autoBackupLastSuccessUtc!)}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Wrap(
                     spacing: 8,
@@ -1934,7 +3013,7 @@ class _HomePageState extends State<HomePage> {
                       ),
                     ],
                   ),
-                  if (_isBackupBusy) ...[
+                  if (_isBackupBusy || _autoBackupBusy) ...[
                     const SizedBox(height: 12),
                     const LinearProgressIndicator(),
                   ],
@@ -1949,7 +3028,10 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _autoBackupTimer?.cancel();
     _documentOpenService.dispose();
+    unawaited(_practiceRecorder.cancel());
     unawaited(_playbackController.dispose());
     _textController.dispose();
     unawaited(_tts.dispose());
@@ -2274,6 +3356,7 @@ class _HomePageState extends State<HomePage> {
                                         _repeatCountPreferenceKey,
                                         value,
                                       );
+                                      _scheduleAutoBackup();
                                     },
                             ),
                           ],
@@ -2313,6 +3396,7 @@ class _HomePageState extends State<HomePage> {
                                           _playbackSpeedPreferenceKey,
                                           value,
                                         );
+                                        _scheduleAutoBackup();
                                       },
                               ),
                             ),
@@ -2394,6 +3478,7 @@ class _HomePageState extends State<HomePage> {
                                           _pauseUsesAudioLengthPreferenceKey,
                                           true,
                                         );
+                                        _scheduleAutoBackup();
                                       } else {
                                         final seconds = double.parse(value);
 
@@ -2411,6 +3496,7 @@ class _HomePageState extends State<HomePage> {
                                           _paddingSecondsPreferenceKey,
                                           seconds,
                                         );
+                                        _scheduleAutoBackup();
                                       }
                                     },
                             ),
@@ -2426,6 +3512,7 @@ class _HomePageState extends State<HomePage> {
         ),
       ),
       libraryTab: _buildLibraryTab(context),
+      practiceTab: _buildPracticeTab(context),
       isPlaying: _isPlaying,
       onStopPlayback: _stopPlayback,
     );
