@@ -1,4 +1,5 @@
 import '../backup/backup_folder_service.dart';
+import '../conversation/conversation_service.dart';
 import '../library/library_metadata.dart';
 import '../library/library_repository.dart';
 import '../native/synthesis_service.dart';
@@ -6,6 +7,7 @@ import '../native/vieneu_ffi.dart';
 import '../playback/playback_session.dart';
 import '../practice/practice_recording_service.dart';
 import '../practice/practice_repository.dart';
+import '../practice/practice_speech_service.dart';
 import '../practice/practice_take_metadata.dart';
 import 'preference_store.dart';
 
@@ -56,6 +58,8 @@ class HomePageEnvironment {
     this.playbackAudioFactory,
     this.backupFolderService,
     this.practiceRecorder,
+    this.conversationService,
+    this.speechService,
   });
 
   final SynthesisService synthesisService;
@@ -64,4 +68,6 @@ class HomePageEnvironment {
   final PlaybackAudio Function()? playbackAudioFactory;
   final BackupFolderService? backupFolderService;
   final PracticeRecorder? practiceRecorder;
+  final ConversationService? conversationService;
+  final PracticeSpeechService? speechService;
 }

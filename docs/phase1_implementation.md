@@ -135,6 +135,70 @@ plays takes at 1x for a direct comparison. Both use the shared playback owner,
 so starting one source stops or blocks the other rather than creating competing
 players.
 
+## Conversation shadowing
+
+`lib/conversation/` discovers short conversational Vietnamese passages and
+turns them into ordinary text-to-speech requests:
+
+- `builtin_conversation_pack.dart` provides 24 original everyday exchanges used
+  when no network, key, or subtitle is available.
+- `subtitle_parser.dart` reads SRT, WebVTT, ASS/SSA, UTF-8/UTF-16 text, and
+  ZIP-wrapped downloads. It strips markup and speaker labels, rejects URLs,
+  unaccented lines, all-caps cues, and non-dialogue tags, then groups adjacent
+  cues into short passages.
+- `open_subtitles_source.dart` calls the OpenSubtitles REST API with
+  `languages=vi`, `type=movie`, download-count ordering, and AI/machine-translated
+  exclusions. It downloads one subtitle per fetch, filters foreign-parts-only
+  entries, and ranks candidates by downloads, rating, trusted uploader, and HD
+  metadata.
+- `subdl_source.dart` provides an alternate provider. It searches SubDL by film
+  name with `languages=vi`, `type=movie`, and `hi=0`, filters AI/hearing-impaired
+  entries, and ranks by available download/rating metadata. A blank film name
+  selects from `subdl_movie_titles.dart`.
+- `conversation_service.dart` owns provider selection, seven-day caches, stale
+  cache fallback, local imports, and the offline fallback.
+
+The UI exposes separate API-key fields for the two providers and an optional
+SubDL film name. Keys and the last film name are saved only in local preferences.
+Local subtitle import uses the system file picker and has a 20 MB cap; the file
+is parsed on device and is not uploaded. The provider caches live in
+`Application Support/vieneu/conversations/`.
+
+**Save & Practice** synthesizes the selected passage with the current curated
+voice, saves it through the normal library repository, selects the new item in
+the Practice tab, and schedules the usual automatic backup. Subtitle content
+remains the property of its creators and is intended for personal study only.
+
+## Practice feedback
+
+The Practice tab can assess a saved take against the generated reference:
+
+- `ios/Runner/AppDelegate.swift` registers the
+  `vietnamese_shadowing/practice_assessment` channel.
+- `transcribe` uses Apple Speech with the `vi-VN` locale and returns text plus
+  timed segments. It requires `supportsOnDeviceRecognition` and sets
+  `requiresOnDeviceRecognition = true`; if on-device Vietnamese recognition is
+  unavailable, it returns `on_device_recognition_unavailable` instead of
+  uploading the take to a server.
+- `pitch` parses the PCM WAV in native code, downsamples it, and runs a
+  windowed autocorrelation analysis to return voiced F0 frames. Frames that
+  cannot be estimated are omitted.
+- `practice_analyzer.dart` aligns reference and user words with a
+  diacritic-insensitive Levenshtein alignment, compares cadence from timed
+  segments and WAV durations, and classifies approximate pitch contours for the
+  six Vietnamese tones.
+- `practice_assessment_service.dart` caches transcription and pitch by audio
+  path and degrades to empty timing/pitch when the bridge cannot provide it.
+- `wav_segment_extractor.dart` slices a normal PCM WAV into a standalone WAV so
+  a tone-guide word can be replayed from the generated reference.
+- `practice_feedback_card.dart` shows recognized-word counts, unclear/extra
+  words, cadence notes, tone guidance, and per-word replay controls.
+
+Feedback is approximate and is not phoneme-level pronunciation scoring. It is
+kept in memory for the current app session; takes remain the durable artifact and
+are included in backups. `NSMicrophoneUsageDescription` and
+`NSSpeechRecognitionUsageDescription` are declared in `ios/Runner/Info.plist`.
+
 ## `.vshadow` packages
 
 `.vshadow` is a ZIP-compatible archive with exactly two root entries:
@@ -269,8 +333,11 @@ Automated:
   import safety, export/import round trips, backup validation, idempotent
   restore, settings, filenames, practice storage, recording channel behavior,
   practice-take backup/restore, version 1 compatibility, automatic backup
-  export/write, and the automatic-backup folder toggle.
-- `flutter test --timeout 90s` passes all automated tests.
+  export/write, the automatic-backup folder toggle, subtitle parsing,
+  OpenSubtitles/SubDL request shapes and caching, local subtitle import, word
+  alignment, cadence, tone feedback, WAV segment extraction, and assessment
+  orchestration/caching.
+- `flutter test --timeout 90s` passes all 157 automated tests.
 - `flutter analyze` reports only `avoid_print` findings.
 - `flutter build ios --simulator` succeeds.
 
@@ -282,10 +349,14 @@ Simulator:
 - Voices, G2P, and all ONNX sessions initialize inside the worker.
 - The Generate tab shows the curated `Nam · male · Adam` voice and the voice
   Preview control; Generate/Library/Practice navigation is visible.
-- Library actions, `.vshadow` file-picking dialogs, automatic-backup folder
-  selection, and microphone recording require interactive exercise; they are
-  covered by repository, service, channel, and widget tests rather than claimed
-  as manually tapped device flows.
+- The Practice tab shows the conversation card and offline pack; the app
+  launches with the built debug app on the iOS simulator and the native engine
+  reaches `Native engine ready`.
+- Library actions, `.vshadow` file-picking dialogs, subtitle file picking,
+  automatic-backup folder selection, API-key entry, microphone recording, and
+  Apple speech recognition require interactive exercise; they are covered by
+  repository, service, channel, parser, analyzer, and widget tests rather than
+  claimed as manually tapped device flows.
 
 ## Known limitations
 
@@ -299,8 +370,27 @@ Simulator:
   partial retake yet.
 - Recording is foreground-only; leaving the app stops and saves the current
   take instead of continuing in the background.
+- Conversation feedback is approximate. Speech recognition is on-device only;
+  if the device does not offer on-device Vietnamese recognition, feedback is
+  unavailable. Pitch/tone classification is heuristic rather than
+  phoneme-level scoring.
+- Device-level validation of Vietnamese `SFSpeechRecognizer` output and pitch
+  analysis is still required. Simulator builds exercise the UI and channel
+  registration but not a real microphone or recognizer session.
+- OpenSubtitles and SubDL require personal API keys and consume provider quota.
+  Automated tests use injected HTTP responses; no live-account request is run.
+- Local subtitle import is capped at 20 MB, and imported lines are not persisted
+  across app restarts. Save the generated reference to the Library for durable
+  practice material.
+- SubDL searches by film name, so a blank field picks from a small curated
+  starter list rather than a global popularity feed.
+- Subtitle files remain copyrighted. Online discovery is intended for personal
+  language study and must follow each provider's terms and quotas.
 - Backups are ZIP containers without encryption; the checksum verifies
   integrity, not authenticity or confidentiality.
 - The native Files/Finder document-open bridge compiles and has Dart channel
   coverage, but it has not been exercised interactively in this validation
   cycle. The in-app Library import path remains the verified fallback.
+- macOS runtime validation is deferred because the bundled
+  `libvieneu_core.dylib` does not match the current native engine source. iOS is
+  the supported runtime for this release.

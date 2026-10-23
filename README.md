@@ -4,10 +4,13 @@ A Flutter app for Vietnamese listening and shadowing practice. Enter Vietnamese
 text, generate speech with a curated southern male voice, loop it at an
 adjustable speed, and keep generated clips in a local library. A dedicated
 Practice tab lets you record takes against any saved clip and compare them with
-the original. Individual clips can be exported as `.vshadow` packages.
-Libraries, settings, and practice takes can be saved and restored as a single
-`.vshadowbackup` file through the iOS Files picker (iCloud Drive or Google
-Drive). Automatic backups can keep one rolling backup in a folder you choose.
+the original. It also offers conversation shadowing: choose a short exchange
+from an offline pack, import a subtitle file, or download high-download
+Vietnamese movie subtitles from OpenSubtitles or SubDL. Individual clips can be
+exported as `.vshadow` packages. Libraries, settings, and practice takes can be
+saved and restored as a single `.vshadowbackup` file through the iOS Files
+picker (iCloud Drive or Google Drive). Automatic backups can keep one rolling
+backup in a folder you choose.
 
 ## Voices
 
@@ -30,6 +33,43 @@ Leaving the app while recording also stops and saves the current take. Recording
 uses the iOS microphone permission and writes a 44.1 kHz mono PCM WAV so takes
 can travel inside backups.
 
+After a take is saved, the app can transcribe it on device with Apple's
+Vietnamese speech recognizer and compare it with the generated reference.
+Feedback lists words that were missing or extra, compares overall and per-word
+cadence, and offers approximate pitch-contour guidance for Vietnamese tones.
+This is a practice aid, not phoneme-level pronunciation scoring. If the device
+does not offer on-device Vietnamese recognition, feedback is unavailable rather
+than uploading the take to a server. Feedback is held in memory for the current
+app session and is not included in backups.
+
+## Conversation practice
+
+The top of the Practice tab has a **Conversation practice** card:
+
+- **Offline pack** — 24 original everyday Vietnamese exchanges. These work
+  without a network connection and are not copied subtitle lines.
+- **Import subtitle** — choose an SRT, WebVTT, ASS, SSA, or ZIP file from this
+  device (up to 20 MB). The file is parsed locally and never uploaded.
+- **OpenSubtitles** — search high-download Vietnamese movie subtitles in
+  descending download order, excluding AI/machine-translated uploads. Requires a
+  personal API key and consumes the account's daily download quota.
+- **SubDL** — an alternate provider when OpenSubtitles is blocked or out of
+  quota. Requires a personal API key. Enter a film name, or leave it blank to
+  choose from a small curated starter list. SubDL results are ranked by available
+  download and rating metadata, and AI/hearing-impaired entries are filtered.
+
+Each provider caches its last successful result for seven days under
+`Application Support/vieneu/conversations/`. If a live request fails, cached
+lines are shown when available; otherwise the offline pack remains usable. API
+keys are stored in local preferences and are never included in backups.
+
+**Save & Practice** generates speech for the selected exchange with the current
+curated voice, saves the audio to the Library, and selects it in the Practice
+tab so it can be recorded and assessed through the normal take flow.
+
+Subtitles remain the property of their creators. Online providers are used only
+for personal language study; respect their terms and quotas.
+
 ## Features
 
 - Background-isolate VieNeu synthesis through the native FFI engine
@@ -44,6 +84,10 @@ can travel inside backups.
   `vshadow-autobackup.vshadowbackup` file updated after changes and on launch
 - Dedicated Practice tab with native microphone recording, saved takes, and
   original/take playback
+- Conversation shadowing from an offline pack, local subtitle import,
+  OpenSubtitles, or SubDL, with a seven-day provider cache
+- On-device Vietnamese speech comparison with word, cadence, and approximate
+  tone-contour feedback
 - External `.vshadow` open handling on iOS and macOS
 - One playback owner shared by the Generate, Library, and Practice tabs
 
@@ -84,7 +128,9 @@ restorable.
 - The vendored native assets under `assets/vieneu/` and `assets/sea-g2p/`
 
 This project currently supports iOS and macOS. The Android runner is a Flutter
-scaffold and is not wired to the native synthesis engine.
+scaffold and is not wired to the native synthesis engine. Conversation speech
+recognition is implemented for iOS only; other platforms keep the offline pack
+and practice recording where available but do not run the Apple speech bridge.
 
 ## Development
 
@@ -98,17 +144,21 @@ flutter build ios --simulator
 ## Documentation
 
 - `docs/phase0_data_contracts.md`: stable voice IDs, library metadata, WAV
-  filenames, and `.vshadow` package contracts
+  filenames, conversation cache/preferences, and `.vshadow` package contracts
 - `docs/phase1_implementation.md`: worker design, curated voices, library,
-  package handling, platform bridges, validation, and known limitations
+  package handling, conversation sources, practice feedback, platform bridges,
+  validation, and known limitations
 
 ## Current status
 
-- `flutter test --timeout 90s` passes all 132 tests.
-- `flutter analyze` reports only `avoid_print` findings.
+- `flutter test --timeout 90s` passes all 157 tests.
+- `flutter analyze` reports only `avoid_print` findings in production diagnostics.
 - The iOS simulator build launches with `Nam · male · Adam` and reaches
   `Native engine ready`.
-- Native folder selection and microphone recording are covered by service,
-  channel, and widget tests; they still require interactive device validation.
-- Native macOS runtime validation is pending, and the native
-  Files/Finder `.vshadow` open path has not been exercised interactively.
+- Native folder selection, file picking, microphone recording, Vietnamese speech
+  recognition, and pitch analysis still require interactive device validation;
+  their channel, parser, analyzer, and widget paths have automated coverage.
+- Live OpenSubtitles and SubDL requests require personal API keys and consume
+  provider quota, so no live-account request is part of the automated tests.
+- Native macOS runtime validation is pending, and the native Files/Finder
+  `.vshadow` open path has not been exercised interactively.

@@ -35,6 +35,9 @@ vieneu/
     <uuid>/
       metadata.json
       audio.wav
+  conversations/
+    open_subtitles_cache.json
+    subdl_cache.json
 ```
 
 `library/<uuid>/audio.wav` is the durable audio reference. A library item must
@@ -85,6 +88,43 @@ The fixed audio filename is `audio.wav`; recordings are 44.1 kHz, mono, 16-bit
 linear PCM WAV. A take remains valid if its source library item is later renamed
 or deleted. Unknown versions, invalid UUIDs/checksums, and audio format or
 duration mismatches are rejected.
+
+## Conversation sources and feedback
+
+Conversation practice is a discovery aid on top of the durable library. It does
+not add a second copy of library audio or takes.
+
+Provider caches live under `Application Support/vieneu/conversations/`:
+
+- `open_subtitles_cache.json`
+- `subdl_cache.json`
+
+Each cache records the fetched UTC time, downloaded source title/metadata, and
+the parsed lines. Entries are fresh for seven days. A stale entry is used only
+when a live request fails, so an outage can fall back to the last successful
+result. The caches contain subtitle text and must be treated as local,
+copyrighted study material.
+
+Provider settings are stored in local preferences, not in the library, caches,
+`.vshadow` packages, or `.vshadowbackup` files:
+
+- `vshadow_opensubtitles_api_key`
+- `vshadow_subdl_api_key`
+- `vshadow_subdl_film_name`
+
+Online and local-import lines are transient UI state. A local SRT/VTT/ASS/SSA/ZIP
+file is parsed on device, is not uploaded, and is not persisted after the app
+restarts. **Save & Practice** produces a normal durable library item through the
+existing synthesis and library contract; that item and any subsequent practice
+takes are backed up normally.
+
+Assessment feedback is also transient. It is keyed to a take ID and held in
+memory for the current session. No feedback text or pitch data is written into
+practice metadata or backups.
+
+Word matching folds Vietnamese diacritics for a forgiving comparison. Tone
+guidance uses a heuristic pitch-contour classification, not phoneme-level
+scoring. The result is approximate and device/bridge dependent.
 
 ## `.vshadow` package contract
 

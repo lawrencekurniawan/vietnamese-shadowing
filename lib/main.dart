@@ -5,11 +5,16 @@ import 'app/home_page_environment.dart';
 import 'app/preference_store.dart';
 import 'backup/auto_backup_service.dart';
 import 'backup/backup_folder_service.dart';
+import 'conversation/conversation_line.dart';
+import 'conversation/conversation_service.dart';
+import 'conversation/open_subtitles_source.dart';
+import 'conversation/subdl_source.dart';
 import 'documents/document_open_service.dart';
 import 'native/synthesis_service.dart';
 import 'native/vieneu_asset_stager.dart';
 
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:file_selector/file_selector.dart';
@@ -28,11 +33,17 @@ import 'native/vieneu_ffi.dart';
 import 'native/vieneu_synthesis_worker.dart';
 import 'playback/playback_controller.dart';
 import 'playback/playback_session.dart';
+import 'practice/practice_assessment_service.dart';
+import 'practice/practice_feedback.dart';
 import 'practice/practice_recording_service.dart';
 import 'practice/practice_repository.dart';
+import 'practice/practice_speech_service.dart';
 import 'practice/practice_take_metadata.dart';
+import 'practice/vietnamese_tone.dart';
+import 'practice/wav_segment_extractor.dart';
 import 'ui/home_tab_scaffold.dart';
 import 'ui/library_item_card.dart';
+import 'ui/practice_feedback_card.dart';
 import 'voices/voice_identity.dart';
 import 'voices/voice_preferences.dart';
 
@@ -94,6 +105,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   static const String _autoBackupLastSuccessPreferenceKey =
       'vshadow_auto_backup_last_success_utc';
 
+  static const String _openSubtitlesApiKeyPreferenceKey =
+      'vshadow_opensubtitles_api_key';
+  static const String _subdlApiKeyPreferenceKey = 'vshadow_subdl_api_key';
+  static const String _subdlFilmNamePreferenceKey = 'vshadow_subdl_film_name';
+
   static const String _vshadowUniformTypeIdentifier =
       'com.example.vietnameseshadowing.vshadow';
 
@@ -105,6 +121,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final TextEditingController _textController = TextEditingController(
     text: 'Hôm nay bạn khỏe không?',
   );
+
+  final TextEditingController _openSubtitlesApiKeyController =
+      TextEditingController();
+  final TextEditingController _subdlApiKeyController = TextEditingController();
+  final TextEditingController _subdlFilmNameController =
+      TextEditingController();
 
   late final SynthesisService _tts;
 
@@ -158,6 +180,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _practiceError;
   String _practiceStatus = 'Ready to practice.';
 
+  late ConversationService _conversationService;
+  List<ConversationLine> _conversationLines = const <ConversationLine>[];
+  ConversationLine? _selectedConversationLine;
+  bool _isConversationLoading = false;
+  bool _isConversationPreparing = false;
+  bool _conversationIsOnline = false;
+  bool _conversationIsLocal = false;
+  bool _showOpenSubtitlesApiKey = false;
+  ConversationOnlineProvider _onlineProvider =
+      ConversationOnlineProvider.openSubtitles;
+  String? _conversationError;
+  String? _conversationInfo;
+  String _conversationSourceLabel = 'Offline conversation pack';
+
+  PracticeAssessmentService? _assessmentService;
+  final Map<String, PracticeFeedback> _feedbackByTakeId =
+      <String, PracticeFeedback>{};
+  final Set<String> _assessingTakeIds = <String>{};
+  String? _assessmentError;
+
   double _playbackSpeed = 1.0;
   int _repeatCount = 1;
   double _paddingSeconds = 0.5;
@@ -184,6 +226,25 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     _practiceRecorder =
         widget.environment?.practiceRecorder ?? PlatformPracticeRecorder();
+
+    _conversationService =
+        widget.environment?.conversationService ?? ConversationService();
+    _conversationLines = _conversationService.builtinLines;
+    _selectedConversationLine = _conversationLines.isEmpty
+        ? null
+        : _conversationLines.first;
+
+    final injectedSpeechService = widget.environment?.speechService;
+
+    if (injectedSpeechService != null) {
+      _assessmentService = PracticeAssessmentService(
+        speechService: injectedSpeechService,
+      );
+    } else if (Platform.isIOS) {
+      _assessmentService = PracticeAssessmentService(
+        speechService: PlatformPracticeSpeechService(),
+      );
+    }
 
     _documentOpenService = DocumentOpenService();
     _documentOpenService.setHandler(_handleExternalDocument);
@@ -260,6 +321,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
         await _drainPendingExternalDocument();
         await _loadAutoBackupSettings();
+        await _loadConversationSettings();
         return;
       }
 
@@ -294,6 +356,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       await cacheDirectory.create(recursive: true);
 
       final cacheRoot = cacheDirectory.path;
+
+      if (widget.environment?.conversationService == null) {
+        final conversationCache = Directory(
+          '${applicationSupportDirectory.path}/vieneu/conversations',
+        );
+        _conversationService = ConversationService(
+          openSubtitles: OpenSubtitlesSource(cacheDirectory: conversationCache),
+          subdl: SubDLSource(cacheDirectory: conversationCache),
+        );
+      }
 
       print('VieNeu: cache root = $cacheRoot');
 
@@ -452,6 +524,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
       await _drainPendingExternalDocument();
       await _loadAutoBackupSettings();
+      await _loadConversationSettings();
     } catch (e, stackTrace) {
       print('');
       print('========================================');
@@ -1402,6 +1475,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _loadConversationSettings() async {
+    try {
+      final openSubtitlesKey = await _preferences.getString(
+        _openSubtitlesApiKeyPreferenceKey,
+      );
+      final subdlKey = await _preferences.getString(_subdlApiKeyPreferenceKey);
+      final subdlFilmName = await _preferences.getString(
+        _subdlFilmNamePreferenceKey,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      if (openSubtitlesKey != null && openSubtitlesKey.isNotEmpty) {
+        _openSubtitlesApiKeyController.text = openSubtitlesKey;
+      }
+
+      if (subdlKey != null && subdlKey.isNotEmpty) {
+        _subdlApiKeyController.text = subdlKey;
+      }
+
+      if (subdlFilmName != null && subdlFilmName.isNotEmpty) {
+        _subdlFilmNameController.text = subdlFilmName;
+      }
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: failed to load online subtitle settings: $error');
+      debugPrint('$stackTrace');
+    }
+  }
+
   Future<void> _toggleAutoBackup(bool enabled) async {
     if (!_autoBackupAvailable) {
       _showStatus('Automatic backup is unavailable on this platform.');
@@ -2214,6 +2318,568 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return null;
   }
 
+  Future<void> _loadOnlineConversationLines({bool forceRefresh = false}) async {
+    if (_isConversationLoading) {
+      return;
+    }
+
+    final provider = _onlineProvider;
+    final isOpenSubtitles =
+        provider == ConversationOnlineProvider.openSubtitles;
+    final apiKey = isOpenSubtitles
+        ? _openSubtitlesApiKeyController.text.trim()
+        : _subdlApiKeyController.text.trim();
+    final filmName = isOpenSubtitles
+        ? null
+        : _subdlFilmNameController.text.trim();
+
+    setState(() {
+      _isConversationLoading = true;
+      _conversationError = null;
+      _conversationInfo = null;
+    });
+
+    try {
+      await _preferences.setString(provider.preferenceKey, apiKey);
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: failed to save ${provider.label} key: $error');
+      debugPrint('$stackTrace');
+    }
+
+    if (!isOpenSubtitles) {
+      try {
+        await _preferences.setString(
+          _subdlFilmNamePreferenceKey,
+          filmName ?? '',
+        );
+      } catch (error, stackTrace) {
+        debugPrint('VieNeu: failed to save SubDL film name: $error');
+        debugPrint('$stackTrace');
+      }
+    }
+
+    try {
+      final result = await _conversationService.loadOnline(
+        provider: provider,
+        apiKey: apiKey,
+        filmName: filmName,
+        forceRefresh: forceRefresh,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isConversationLoading = false;
+        _conversationLines = result.lines;
+        _selectedConversationLine = result.lines.isEmpty
+            ? null
+            : result.lines.first;
+        _conversationIsOnline = result.isOnline;
+        _conversationIsLocal = result.isLocal;
+        _conversationSourceLabel = result.sourceLabel;
+
+        if (result.isOnline) {
+          _conversationInfo = result.warning;
+          _conversationError = null;
+        } else if (apiKey.isNotEmpty) {
+          _conversationInfo = null;
+          _conversationError = result.warning;
+        } else {
+          _conversationInfo = result.warning;
+          _conversationError = null;
+        }
+      });
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: online conversation fetch failed: $error');
+      debugPrint('$stackTrace');
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isConversationLoading = false;
+        _conversationError = '${provider.label} discovery failed: $error';
+      });
+    }
+  }
+
+  Future<void> _importConversationSubtitle() async {
+    if (_isConversationLoading) {
+      return;
+    }
+
+    XFile? file;
+
+    try {
+      file = await openFile(
+        acceptedTypeGroups: const <XTypeGroup>[
+          XTypeGroup(
+            label: 'Subtitle files',
+            extensions: <String>['srt', 'vtt', 'ass', 'ssa', 'zip'],
+            mimeTypes: <String>['text/plain', 'text/vtt', 'application/zip'],
+            uniformTypeIdentifiers: <String>['public.text', 'public.data'],
+          ),
+        ],
+      );
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: subtitle picker failed: $error');
+      debugPrint('$stackTrace');
+
+      if (mounted) {
+        setState(() {
+          _conversationError = 'Could not open the subtitle picker: $error';
+        });
+      }
+      return;
+    }
+
+    if (file == null) {
+      return;
+    }
+
+    final selectedFile = file;
+
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      _isConversationLoading = true;
+      _conversationError = null;
+      _conversationInfo = 'Reading ${selectedFile.name}...';
+    });
+
+    try {
+      const maximumSubtitleBytes = 20 * 1024 * 1024;
+      final length = await selectedFile.length();
+
+      if (length > maximumSubtitleBytes) {
+        throw const ConversationImportException(
+          'The subtitle file is larger than 20 MB.',
+        );
+      }
+
+      final bytes = await selectedFile.readAsBytes();
+
+      if (bytes.length > maximumSubtitleBytes) {
+        throw const ConversationImportException(
+          'The subtitle file is larger than 20 MB.',
+        );
+      }
+
+      final result = _conversationService.loadLocalSubtitle(
+        fileName: selectedFile.name,
+        bytes: bytes,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isConversationLoading = false;
+        _conversationLines = result.lines;
+        _selectedConversationLine = result.lines.isEmpty
+            ? null
+            : result.lines.first;
+        _conversationIsOnline = false;
+        _conversationIsLocal = true;
+        _conversationSourceLabel = result.sourceLabel;
+        _conversationInfo = result.warning;
+        _conversationError = null;
+      });
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: subtitle import failed: $error');
+      debugPrint('$stackTrace');
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isConversationLoading = false;
+        _conversationInfo = null;
+        _conversationError = 'Could not import that subtitle: $error';
+      });
+    }
+  }
+
+  void _selectConversationLine(String? lineId) {
+    if (lineId == null) {
+      return;
+    }
+
+    for (final line in _conversationLines) {
+      if (line.id == lineId) {
+        setState(() {
+          _selectedConversationLine = line;
+        });
+        return;
+      }
+    }
+  }
+
+  void _randomConversationLine() {
+    final lines = _conversationLines;
+
+    if (lines.isEmpty) {
+      return;
+    }
+
+    final index = math.Random().nextInt(lines.length);
+
+    setState(() {
+      _selectedConversationLine = lines[index];
+      _conversationInfo =
+          'Picked a random line. Press “Hear reference” '
+          'or “Save & Practice”.';
+    });
+  }
+
+  Future<void> _previewConversationReference() async {
+    final line = _selectedConversationLine;
+    final voice = _selectedVoice;
+
+    if (line == null) {
+      setState(() {
+        _conversationError = 'Choose a conversation line first.';
+      });
+      return;
+    }
+
+    if (voice == null) {
+      setState(() {
+        _conversationError = 'Select a voice before generating speech.';
+      });
+      return;
+    }
+
+    if (_isConversationPreparing || _isConversationLoading) {
+      return;
+    }
+
+    if (_isRecording) {
+      setState(() {
+        _conversationError =
+            'Stop the current recording before playing a reference.';
+      });
+      return;
+    }
+
+    if (_isPlaying) {
+      await _stopPlayback();
+    }
+
+    setState(() {
+      _isConversationPreparing = true;
+      _conversationError = null;
+      _conversationInfo = 'Generating the reference with ${voice.name}...';
+    });
+
+    try {
+      final result = await _tts.synthesizeToWav(
+        text: line.textForSpeech,
+        voiceId: voice.id,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isConversationPreparing = false;
+        _conversationInfo = 'Reference ready. Listen, then shadow it.';
+      });
+
+      await _playWavPath(
+        result.path,
+        playbackSpeed: 1.0,
+        repeatCount: 1,
+        paddingSeconds: 0,
+        pauseUsesAudioLength: false,
+        playingStatus: 'Playing conversation reference...',
+      );
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: conversation preview failed: $error');
+      debugPrint('$stackTrace');
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isConversationPreparing = false;
+        _conversationError = 'Could not generate the reference: $error';
+      });
+    }
+  }
+
+  Future<void> _saveConversationToLibrary() async {
+    final line = _selectedConversationLine;
+    final voice = _selectedVoice;
+    final repository = _libraryRepository;
+
+    if (line == null) {
+      setState(() {
+        _conversationError = 'Choose a conversation line first.';
+      });
+      return;
+    }
+
+    if (voice == null) {
+      setState(() {
+        _conversationError = 'Select a voice before generating speech.';
+      });
+      return;
+    }
+
+    if (repository == null) {
+      setState(() {
+        _conversationError = 'The Library is unavailable.';
+      });
+      return;
+    }
+
+    if (_isConversationPreparing || _isConversationLoading) {
+      return;
+    }
+
+    if (_isRecording) {
+      setState(() {
+        _conversationError =
+            'Stop the current recording before saving a reference.';
+      });
+      return;
+    }
+
+    if (_isPlaying) {
+      await _stopPlayback();
+    }
+
+    setState(() {
+      _isConversationPreparing = true;
+      _conversationError = null;
+      _conversationInfo = 'Generating speech and saving to the Library...';
+      _practiceStatus = 'Preparing conversation reference...';
+    });
+
+    try {
+      String normalizedText;
+
+      try {
+        normalizedText = await _tts.previewSpeechText(line.textForSpeech);
+      } catch (_) {
+        normalizedText = line.textForSpeech;
+      }
+
+      final result = await _tts.synthesizeToWav(
+        text: line.textForSpeech,
+        voiceId: voice.id,
+      );
+      final item = await repository.saveFromWavFile(
+        title: line.suggestedLibraryTitle,
+        originalText: line.displayText,
+        normalizedText: normalizedText,
+        voice: VoiceMetadata.fromVoice(voice),
+        sourceWavPath: result.path,
+      );
+
+      await _refreshLibrary();
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isConversationPreparing = false;
+        _selectedPracticeItemId = item.itemId;
+        _selectedTab = 2;
+        _practiceStatus =
+            'Reference ready for ${item.title}. Listen, then record.';
+        _conversationInfo =
+            'Saved to the Library. The reference is ready in Practice.';
+      });
+
+      _scheduleAutoBackup();
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: conversation save failed: $error');
+      debugPrint('$stackTrace');
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isConversationPreparing = false;
+        _conversationError = 'Could not save this line: $error';
+        _practiceStatus = 'Conversation preparation failed.';
+      });
+    }
+  }
+
+  Future<void> _playToneGuideItem(
+    PracticeFeedback feedback,
+    ToneGuideItem item,
+  ) async {
+    if (!item.canPlay || _isPlaying || _isRecording) {
+      return;
+    }
+
+    File? temporaryFile;
+
+    try {
+      final bytes = await File(feedback.referenceAudioPath).readAsBytes();
+      final segment = WavSegmentExtractor.extract(
+        bytes: bytes,
+        startSeconds: item.startSeconds!,
+        durationSeconds: item.durationSeconds!,
+      );
+      temporaryFile = File(
+        '${Directory.systemTemp.path}/vshadow-tone-'
+        '${DateTime.now().microsecondsSinceEpoch}.wav',
+      );
+      await temporaryFile.writeAsBytes(segment, flush: true);
+
+      await _playWavPath(
+        temporaryFile.path,
+        playbackSpeed: 1.0,
+        repeatCount: 1,
+        paddingSeconds: 0,
+        pauseUsesAudioLength: false,
+        playingStatus: 'Playing ${item.text} · ${item.tone.label}...',
+      );
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: tone segment playback failed: $error');
+      debugPrint('$stackTrace');
+
+      if (mounted) {
+        setState(() {
+          _practiceStatus = 'Could not play that word: $error';
+        });
+      }
+    } finally {
+      if (temporaryFile != null) {
+        try {
+          await temporaryFile.delete();
+        } on FileSystemException {
+          // The temporary file may already have been removed.
+        }
+      }
+    }
+  }
+
+  Future<void> _assessPracticeTake(
+    PracticeTakeMetadata take, {
+    LibraryItemMetadata? item,
+    bool automatic = false,
+  }) async {
+    if (!mounted) {
+      return;
+    }
+
+    final service = _assessmentService;
+
+    if (service == null) {
+      if (mounted) {
+        setState(() {
+          _practiceStatus = 'Speech feedback is only available in the iOS app.';
+        });
+      }
+      return;
+    }
+
+    if (_assessingTakeIds.contains(take.takeId)) {
+      return;
+    }
+
+    final libraryRepository = _libraryRepository;
+    final practiceRepository = _practiceRepository;
+    final libraryItem = item ?? _findLibraryItem(take.libraryItemId);
+
+    if (libraryRepository == null ||
+        practiceRepository == null ||
+        libraryItem == null) {
+      if (mounted) {
+        setState(() {
+          _assessmentError =
+              'The library item for this take is no longer available, so '
+              'word feedback cannot be checked. The take is still playable.';
+        });
+      }
+      return;
+    }
+
+    final referencePath = libraryRepository.audioFile(libraryItem.itemId).path;
+    final userPath = practiceRepository.audioFile(take.takeId).path;
+
+    if (!File(referencePath).existsSync() || !File(userPath).existsSync()) {
+      if (mounted) {
+        setState(() {
+          _assessmentError =
+              'The reference or take audio is missing, so feedback cannot '
+              'be checked.';
+        });
+      }
+      return;
+    }
+
+    setState(() {
+      _assessingTakeIds.add(take.takeId);
+      _assessmentError = null;
+      _practiceStatus = automatic
+          ? 'Listening back and comparing your take...'
+          : 'Assessing ${take.itemTitle}...';
+    });
+
+    try {
+      final referenceText = libraryItem.normalizedText.trim().isNotEmpty
+          ? libraryItem.normalizedText
+          : libraryItem.originalText;
+
+      final feedback = await service.assess(
+        referenceText: referenceText,
+        referenceAudioPath: referencePath,
+        userAudioPath: userPath,
+      );
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _feedbackByTakeId[take.takeId] = feedback;
+        _assessingTakeIds.remove(take.takeId);
+        _practiceStatus = 'Feedback ready for ${take.itemTitle}.';
+      });
+    } catch (error, stackTrace) {
+      debugPrint('VieNeu: practice assessment failed: $error');
+      debugPrint('$stackTrace');
+
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _assessingTakeIds.remove(take.takeId);
+        _assessmentError = 'Feedback unavailable: $error';
+        _practiceStatus = 'The take was saved, but feedback failed.';
+      });
+    }
+  }
+
+  LibraryItemMetadata? _findLibraryItem(String itemId) {
+    for (final item in _libraryItems) {
+      if (item.itemId == itemId) {
+        return item;
+      }
+    }
+
+    return null;
+  }
+
   Future<void> _refreshPracticeTakes() async {
     final repository = _practiceRepository;
 
@@ -2416,7 +3082,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
 
     try {
-      await repository.saveFromWavFile(
+      final savedTake = await repository.saveFromWavFile(
         libraryItemId: item.itemId,
         itemTitle: item.title,
         sourceWavPath: result.path,
@@ -2431,6 +3097,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _isSavingTake = false;
           _practiceStatus = 'Saved a take for ${item.title}.';
         });
+      }
+
+      if (mounted && _assessmentService != null) {
+        unawaited(_assessPracticeTake(savedTake, item: item, automatic: true));
       }
     } catch (error, stackTrace) {
       debugPrint('VieNeu: saving practice take failed: $error');
@@ -2497,6 +3167,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
 
       await repository.delete(take.takeId);
+      _feedbackByTakeId.remove(take.takeId);
+      _assessingTakeIds.remove(take.takeId);
       await _refreshPracticeTakes();
       _scheduleAutoBackup();
 
@@ -2537,6 +3209,330 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     return '${duration.toStringAsFixed(1)} s';
   }
 
+  Widget _buildConversationPracticeCard(BuildContext context) {
+    final selected = _selectedConversationLine;
+    final engineReady = !_isInitializing && _selectedVoice != null;
+    final busy = _isConversationLoading || _isConversationPreparing;
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Card(
+      key: const ValueKey<String>('conversation-practice-card'),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.theater_comedy_outlined, color: colorScheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Conversation practice',
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 3,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _conversationIsOnline
+                        ? colorScheme.primaryContainer
+                        : colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    _conversationIsOnline
+                        ? 'online'
+                        : _conversationIsLocal
+                        ? 'local file'
+                        : 'offline pack',
+                    style: Theme.of(context).textTheme.labelSmall,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Pick a natural exchange, hear the generated reference, then '
+              'record your shadowing take. High-download subtitles are '
+              'filtered for clean, non-AI Vietnamese lines.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Source: $_conversationSourceLabel',
+              style: Theme.of(context).textTheme.labelSmall
+                  ?.copyWith(color: colorScheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
+            if (_conversationLines.isEmpty)
+              Text(
+                'No conversation lines are available.',
+                style: Theme.of(context).textTheme.bodyMedium,
+              )
+            else ...[
+              DropdownButtonFormField<String>(
+                key: ValueKey<String>(
+                  'conversation-line-dropdown-${selected?.id}',
+                ),
+                initialValue: selected?.id,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Conversation line',
+                  border: OutlineInputBorder(),
+                ),
+                items: [
+                  for (final line in _conversationLines)
+                    DropdownMenuItem<String>(
+                      value: line.id,
+                      child: Text(
+                        line.suggestedLibraryTitle,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
+                onChanged: busy ? null : _selectConversationLine,
+              ),
+              if (selected != null) ...[
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    selected.displayText,
+                    style: Theme.of(context).textTheme.bodyLarge,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '${selected.sourceTitle} · ${selected.sourceDetail}',
+                  style: Theme.of(context).textTheme.bodySmall
+                      ?.copyWith(color: colorScheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    OutlinedButton.icon(
+                      key: const ValueKey<String>('conversation-random'),
+                      onPressed: busy ? null : _randomConversationLine,
+                      icon: const Icon(Icons.casino_outlined, size: 18),
+                      label: const Text('Random line'),
+                    ),
+                    OutlinedButton.icon(
+                      key: const ValueKey<String>('conversation-import-file'),
+                      onPressed: busy ? null : _importConversationSubtitle,
+                      icon: const Icon(Icons.file_open_outlined, size: 18),
+                      label: const Text('Import subtitle'),
+                    ),
+                    OutlinedButton.icon(
+                      key: const ValueKey<String>('conversation-preview'),
+                      onPressed: engineReady && !busy && !_isPlaying
+                          ? _previewConversationReference
+                          : null,
+                      icon: const Icon(Icons.volume_up_outlined, size: 18),
+                      label: const Text('Hear reference'),
+                    ),
+                    FilledButton.icon(
+                      key: const ValueKey<String>('conversation-save-practice'),
+                      onPressed: engineReady && !busy
+                          ? _saveConversationToLibrary
+                          : null,
+                      icon: const Icon(Icons.mic_none, size: 18),
+                      label: const Text('Save & Practice'),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+            if (busy) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(),
+            ],
+            if (_conversationInfo != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                _conversationInfo!,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+            if (_conversationError != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                _conversationError!,
+                style: Theme.of(context).textTheme.bodySmall
+                    ?.copyWith(color: colorScheme.error),
+              ),
+            ],
+            const SizedBox(height: 6),
+            ExpansionTile(
+              key: const ValueKey<String>('conversation-online-section'),
+              tilePadding: EdgeInsets.zero,
+              childrenPadding: const EdgeInsets.only(bottom: 4),
+              title: const Text('Online subtitle source'),
+              subtitle: Text(
+                'Optional. Search high-download Vietnamese movie subtitles. '
+                'If one provider is blocked, switch to the other.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  child: SegmentedButton<ConversationOnlineProvider>(
+                    key: const ValueKey<String>('conversation-provider'),
+                    segments: const <ButtonSegment<ConversationOnlineProvider>>[
+                      ButtonSegment<ConversationOnlineProvider>(
+                        value: ConversationOnlineProvider.openSubtitles,
+                        label: Text('OpenSubtitles'),
+                      ),
+                      ButtonSegment<ConversationOnlineProvider>(
+                        value: ConversationOnlineProvider.subdl,
+                        label: Text('SubDL'),
+                      ),
+                    ],
+                    selected: <ConversationOnlineProvider>{_onlineProvider},
+                    onSelectionChanged: _isConversationLoading
+                        ? null
+                        : (selection) {
+                            final provider = selection.first;
+                            setState(() {
+                              _onlineProvider = provider;
+                              _conversationError = null;
+                              _conversationInfo =
+                                  '${provider.label} selected. Add its API key '
+                                  'and fetch lines.';
+                            });
+                          },
+                  ),
+                ),
+                const SizedBox(height: 10),
+                if (_onlineProvider == ConversationOnlineProvider.openSubtitles)
+                  TextField(
+                    key: const ValueKey<String>('conversation-api-key-open'),
+                    controller: _openSubtitlesApiKeyController,
+                    enabled: !_isConversationLoading,
+                    obscureText: !_showOpenSubtitlesApiKey,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    decoration: InputDecoration(
+                      labelText: 'OpenSubtitles API key',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        tooltip: _showOpenSubtitlesApiKey
+                            ? 'Hide API key'
+                            : 'Show API key',
+                        onPressed: () {
+                          setState(() {
+                            _showOpenSubtitlesApiKey =
+                                !_showOpenSubtitlesApiKey;
+                          });
+                        },
+                        icon: Icon(
+                          _showOpenSubtitlesApiKey
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                        ),
+                      ),
+                    ),
+                  )
+                else ...[
+                  TextField(
+                    key: const ValueKey<String>('conversation-api-key-subdl'),
+                    controller: _subdlApiKeyController,
+                    enabled: !_isConversationLoading,
+                    obscureText: !_showOpenSubtitlesApiKey,
+                    autocorrect: false,
+                    enableSuggestions: false,
+                    decoration: InputDecoration(
+                      labelText: 'SubDL API key',
+                      border: const OutlineInputBorder(),
+                      suffixIcon: IconButton(
+                        tooltip: _showOpenSubtitlesApiKey
+                            ? 'Hide API key'
+                            : 'Show API key',
+                        onPressed: () {
+                          setState(() {
+                            _showOpenSubtitlesApiKey =
+                                !_showOpenSubtitlesApiKey;
+                          });
+                        },
+                        icon: Icon(
+                          _showOpenSubtitlesApiKey
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    key: const ValueKey<String>('conversation-subdl-film'),
+                    controller: _subdlFilmNameController,
+                    enabled: !_isConversationLoading,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: const InputDecoration(
+                      labelText: 'Film name (optional)',
+                      hintText: 'e.g. Inception, Mắt biếc',
+                      helperText:
+                          'Leave blank to pick a well-known film at random.',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.tonalIcon(
+                      key: const ValueKey<String>('conversation-find-online'),
+                      onPressed: _isConversationLoading
+                          ? null
+                          : () => _loadOnlineConversationLines(),
+                      icon: const Icon(Icons.cloud_download_outlined, size: 18),
+                      label: Text('Find ${_onlineProvider.label} lines'),
+                    ),
+                    if (_conversationIsOnline)
+                      OutlinedButton.icon(
+                        key: const ValueKey<String>(
+                          'conversation-download-new',
+                        ),
+                        onPressed: _isConversationLoading
+                            ? null
+                            : () => _loadOnlineConversationLines(
+                                forceRefresh: true,
+                              ),
+                        icon: const Icon(Icons.refresh, size: 18),
+                        label: const Text('Download new'),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Online downloads are subject to each provider\'s quota. '
+                  'Subtitles remain the property of their creators; use them '
+                  'for personal study only. You can also import a subtitle '
+                  'file from this device. Without an API key, the offline '
+                  'conversation pack is always available.',
+                  style: Theme.of(context).textTheme.labelSmall
+                      ?.copyWith(color: colorScheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildPracticeTab(BuildContext context) {
     final repository = _practiceRepository;
 
@@ -2555,7 +3551,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
     final selectedItem = _selectedPracticeItem;
     final canRecord =
-        selectedItem != null && !_isSavingTake && !_isPracticeLoading;
+        selectedItem != null &&
+        !_isSavingTake &&
+        !_isPracticeLoading &&
+        _assessingTakeIds.isEmpty;
 
     return RefreshIndicator(
       onRefresh: _refreshPracticeTakes,
@@ -2581,6 +3580,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 6),
           Text(_practiceStatus, style: Theme.of(context).textTheme.bodyMedium),
+          const SizedBox(height: 12),
+          _buildConversationPracticeCard(context),
           const SizedBox(height: 12),
           if (_libraryItems.isEmpty)
             Card(
@@ -2609,6 +3610,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               child: DropdownButtonFormField<String>(
                 key: const ValueKey<String>('practice-item-dropdown'),
                 initialValue: selectedItem?.itemId,
+                isExpanded: true,
                 decoration: const InputDecoration(
                   labelText: 'Practice this item',
                   border: OutlineInputBorder(),
@@ -2753,6 +3755,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                             icon: const Icon(Icons.play_arrow, size: 18),
                             label: const Text('Play Take'),
                           ),
+                          OutlinedButton.icon(
+                            key: ValueKey<String>(
+                              'practice-assess-take-${take.takeId}',
+                            ),
+                            onPressed:
+                                _isPlaying ||
+                                    _isRecording ||
+                                    _assessingTakeIds.isNotEmpty
+                                ? null
+                                : () => _assessPracticeTake(take),
+                            icon: const Icon(Icons.insights_outlined, size: 18),
+                            label: const Text('Assess'),
+                          ),
                           TextButton.icon(
                             key: ValueKey<String>(
                               'practice-delete-take-${take.takeId}',
@@ -2765,12 +3780,40 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           ),
                         ],
                       ),
+                      if (_assessingTakeIds.contains(take.takeId)) ...[
+                        const SizedBox(height: 8),
+                        const LinearProgressIndicator(),
+                      ],
+                      if (_feedbackByTakeId[take.takeId] != null) ...[
+                        const SizedBox(height: 8),
+                        PracticeFeedbackCard(
+                          feedback: _feedbackByTakeId[take.takeId]!,
+                          isPlaying: _isPlaying,
+                          enabled: !_isRecording,
+                          onPlayTone: _playToneGuideItem,
+                        ),
+                      ],
                     ],
                   ),
                 ),
               ),
               const SizedBox(height: 8),
             ],
+          ],
+          if (_assessmentError != null) ...[
+            const SizedBox(height: 12),
+            Card(
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  _assessmentError!,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.onErrorContainer,
+                  ),
+                ),
+              ),
+            ),
           ],
           if (_practiceError != null) ...[
             const SizedBox(height: 12),
@@ -3034,6 +4077,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     unawaited(_practiceRecorder.cancel());
     unawaited(_playbackController.dispose());
     _textController.dispose();
+    _openSubtitlesApiKeyController.dispose();
+    _subdlApiKeyController.dispose();
+    _subdlFilmNameController.dispose();
     unawaited(_tts.dispose());
 
     super.dispose();

@@ -203,6 +203,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.widgetWithText(AppBar, 'Practice'), findsOneWidget);
+    await tester.scrollUntilVisible(
+      find.byKey(const ValueKey<String>('practice-item-dropdown')),
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.pumpAndSettle();
     expect(find.text('Morning practice'), findsWidgets);
     expect(find.text('No practice takes yet.'), findsOneWidget);
 
@@ -223,6 +229,8 @@ void main() {
     await tester.pump();
 
     expect(recorder.stopCalls, 1);
+    await tester.drag(find.byType(Scrollable).last, const Offset(0, 900));
+    await tester.pumpAndSettle();
     expect(find.textContaining('Saved a take'), findsOneWidget);
 
     final takes = await practice.list();
@@ -233,7 +241,11 @@ void main() {
     final playTake = find.byKey(
       ValueKey<String>('practice-play-take-${takes.single.takeId}'),
     );
-    await tester.ensureVisible(playTake);
+    await tester.scrollUntilVisible(
+      playTake,
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
     await tester.tap(playTake);
     await tester.pump();
     await tester.runAsync(() async {

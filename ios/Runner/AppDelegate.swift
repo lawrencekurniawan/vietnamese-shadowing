@@ -1,5 +1,6 @@
 import AVFoundation
 import Flutter
+import Speech
 import UIKit
 import UniformTypeIdentifiers
 
@@ -688,6 +689,594 @@ final class PracticeRecordingBridge {
   }
 }
 
+final class PracticeAssessmentBridge {
+  static let shared = PracticeAssessmentBridge()
+
+  private static let channelName = "vietnamese_shadowing/practice_assessment"
+
+  private var channel: FlutterMethodChannel?
+  private var activeRecognizer: SFSpeechRecognizer?
+  private var activeTask: SFSpeechRecognitionTask?
+  private var recognitionGeneration = 0
+
+  private init() {}
+
+  func register(messenger: FlutterBinaryMessenger) {
+    let channel = FlutterMethodChannel(
+      name: Self.channelName,
+      binaryMessenger: messenger
+    )
+
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard let self = self else {
+        return
+      }
+
+      let arguments = call.arguments as? [String: Any] ?? [:]
+
+      switch call.method {
+      case "transcribe":
+        self.transcribe(arguments: arguments, result: result)
+      case "pitch":
+        self.pitch(arguments: arguments, result: result)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    self.channel = channel
+  }
+
+  private func transcribe(
+    arguments: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    guard
+      let path = arguments["path"] as? String,
+      !path.isEmpty
+    else {
+      result(FlutterError(
+        code: "invalid_audio",
+        message: "The recording path is missing.",
+        details: nil
+      ))
+      return
+    }
+
+    guard FileManager.default.fileExists(atPath: path) else {
+      result(FlutterError(
+        code: "invalid_audio",
+        message: "The recording file no longer exists.",
+        details: nil
+      ))
+      return
+    }
+
+    let localeIdentifier = arguments["locale"] as? String ?? "vi-VN"
+
+    recognitionGeneration += 1
+    let generation = recognitionGeneration
+
+    activeTask?.cancel()
+    activeTask = nil
+    activeRecognizer = nil
+
+    SFSpeechRecognizer.requestAuthorization { status in
+      DispatchQueue.main.async {
+        guard generation == self.recognitionGeneration else {
+          result(FlutterError(
+            code: "recognition_cancelled",
+            message: "Speech recognition was superseded by a newer request.",
+            details: nil
+          ))
+          return
+        }
+
+        guard status == .authorized else {
+          result(FlutterError(
+            code: "speech_permission_denied",
+            message: status == .restricted
+              ? "Speech recognition is restricted on this device."
+              : "Speech recognition permission is required for feedback. "
+                + "Enable it in iOS Settings.",
+            details: nil
+          ))
+          return
+        }
+
+        guard let recognizer = SFSpeechRecognizer(
+          locale: Locale(identifier: localeIdentifier)
+        ) else {
+          result(FlutterError(
+            code: "speech_unavailable",
+            message: "Vietnamese speech recognition is not available.",
+            details: nil
+          ))
+          return
+        }
+
+        guard recognizer.isAvailable else {
+          result(FlutterError(
+            code: "speech_unavailable",
+            message: "Vietnamese speech recognition is temporarily unavailable.",
+            details: nil
+          ))
+          return
+        }
+
+        guard recognizer.supportsOnDeviceRecognition else {
+          result(FlutterError(
+            code: "on_device_recognition_unavailable",
+            message: "On-device Vietnamese speech recognition is not available "
+              + "on this device. Feedback is unavailable without sending audio "
+              + "to a server.",
+            details: nil
+          ))
+          return
+        }
+
+        let request = SFSpeechURLRecognitionRequest(
+          url: URL(fileURLWithPath: path)
+        )
+        request.shouldReportPartialResults = false
+        request.taskHint = .dictation
+        request.requiresOnDeviceRecognition = true
+
+        if #available(iOS 16.0, *) {
+          request.addsPunctuation = true
+        }
+
+        var completed = false
+
+        let finish: (Any?) -> Void = { [weak self] value in
+          guard !completed else {
+            return
+          }
+
+          completed = true
+
+          if self?.recognitionGeneration == generation {
+            self?.activeTask = nil
+            self?.activeRecognizer = nil
+          }
+
+          result(value)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 35) { [weak self] in
+          guard
+            !completed,
+            let self = self,
+            generation == self.recognitionGeneration
+          else {
+            return
+          }
+
+          self.activeTask?.cancel()
+          finish(FlutterError(
+            code: "recognition_timeout",
+            message: "Speech recognition took too long. Try a shorter take.",
+            details: nil
+          ))
+        }
+
+        self.activeRecognizer = recognizer
+        let task = recognizer.recognitionTask(with: request) { recognitionResult, error in
+          DispatchQueue.main.async {
+            if let error = error {
+              finish(FlutterError(
+                code: "recognition_failed",
+                message: error.localizedDescription,
+                details: nil
+              ))
+              return
+            }
+
+            guard
+              let recognitionResult = recognitionResult,
+              recognitionResult.isFinal
+            else {
+              return
+            }
+
+            let segments: [[String: Any]] = recognitionResult
+              .bestTranscription
+              .segments
+              .map { segment in
+                [
+                  "text": segment.substring,
+                  "start_seconds": segment.timestamp,
+                  "duration_seconds": segment.duration,
+                  "confidence": segment.confidence >= 0
+                    ? Double(segment.confidence)
+                    : NSNull()
+                ]
+              }
+
+            finish([
+              "text": recognitionResult.bestTranscription.formattedString,
+              "segments": segments,
+              "on_device": true
+            ])
+          }
+        }
+        self.activeTask = task
+      }
+    }
+  }
+
+  private func pitch(
+    arguments: [String: Any],
+    result: @escaping FlutterResult
+  ) {
+    guard
+      let path = arguments["path"] as? String,
+      !path.isEmpty
+    else {
+      result(FlutterError(
+        code: "invalid_audio",
+        message: "The recording path is missing.",
+        details: nil
+      ))
+      return
+    }
+
+    guard FileManager.default.fileExists(atPath: path) else {
+      result(FlutterError(
+        code: "invalid_audio",
+        message: "The recording file no longer exists.",
+        details: nil
+      ))
+      return
+    }
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      do {
+        let frames = try Self.extractPitchFrames(path: path)
+        DispatchQueue.main.async {
+          result(["frames": frames])
+        }
+      } catch {
+        DispatchQueue.main.async {
+          result(FlutterError(
+            code: "pitch_failed",
+            message: error.localizedDescription,
+            details: nil
+          ))
+        }
+      }
+    }
+  }
+
+  private static func extractPitchFrames(
+    path: String
+  ) throws -> [[String: Any]] {
+    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    let bytes = [UInt8](data)
+    let wav = try parseWav(bytes)
+    let targetRate = 8_000.0
+    let maximumSourceSeconds = 90.0
+    let sourceFrames = min(
+      wav.frameCount,
+      Int(wav.sampleRate * maximumSourceSeconds)
+    )
+
+    guard sourceFrames > 0 else {
+      return []
+    }
+
+    var mono = [Double]()
+    mono.reserveCapacity(sourceFrames)
+
+    for frame in 0..<sourceFrames {
+      var sum = 0.0
+
+      for channel in 0..<wav.channels {
+        let sampleOffset =
+          wav.dataOffset + frame * wav.blockAlign + channel * wav.bytesPerSample
+        sum += readSample(
+          bytes: bytes,
+          offset: sampleOffset,
+          bitsPerSample: wav.bitsPerSample
+        )
+      }
+
+      mono.append(sum / Double(wav.channels))
+    }
+
+    let targetCount = Int(
+      Double(sourceFrames) * targetRate / wav.sampleRate
+    )
+
+    guard targetCount >= 320 else {
+      return []
+    }
+
+    var samples = [Double](repeating: 0, count: targetCount)
+
+    for index in 0..<targetCount {
+      let position = Double(index) * wav.sampleRate / targetRate
+      let base = Int(position)
+      let fraction = position - Double(base)
+      let next = min(base + 1, sourceFrames - 1)
+      samples[index] =
+        mono[base] * (1.0 - fraction) + mono[next] * fraction
+    }
+
+    let window = 320
+    let hop = 80
+    let minimumLag = 19
+    let maximumLag = min(114, window - 2)
+    var frames: [[String: Any]] = []
+    var work = [Double](repeating: 0, count: window)
+
+    guard samples.count >= window else {
+      return []
+    }
+
+    for start in stride(
+      from: 0,
+      through: samples.count - window,
+      by: hop
+    ) {
+      var mean = 0.0
+
+      for index in 0..<window {
+        mean += samples[start + index]
+      }
+
+      mean /= Double(window)
+
+      var energy = 0.0
+
+      for index in 0..<window {
+        let value = samples[start + index] - mean
+        work[index] = value
+        energy += value * value
+      }
+
+      let rms = sqrt(energy / Double(window))
+
+      if rms < 0.008 {
+        continue
+      }
+
+      var bestLag = 0
+      var bestCorrelation = -1.0
+
+      for lag in minimumLag...maximumLag {
+        var dot = 0.0
+        var energyA = 0.0
+        var energyB = 0.0
+        let limit = window - lag
+
+        for index in 0..<limit {
+          let a = work[index]
+          let b = work[index + lag]
+          dot += a * b
+          energyA += a * a
+          energyB += b * b
+        }
+
+        let denominator = sqrt(energyA * energyB) + 1e-12
+        let correlation = dot / denominator
+
+        if correlation > bestCorrelation {
+          bestCorrelation = correlation
+          bestLag = lag
+        }
+      }
+
+      guard bestLag > 0 && bestCorrelation >= 0.28 else {
+        continue
+      }
+
+      let frequency = targetRate / Double(bestLag)
+
+      guard frequency >= 70.0 && frequency <= 420.0 else {
+        continue
+      }
+
+      frames.append([
+        "time_seconds": Double(start + window / 2) / targetRate,
+        "f0_hz": frequency
+      ])
+    }
+
+    return frames
+  }
+
+  private struct WavData {
+    let sampleRate: Double
+    let channels: Int
+    let bitsPerSample: Int
+    let blockAlign: Int
+    let bytesPerSample: Int
+    let dataOffset: Int
+    let dataSize: Int
+
+    var frameCount: Int {
+      guard blockAlign > 0 else {
+        return 0
+      }
+
+      return dataSize / blockAlign
+    }
+  }
+
+  private static func parseWav(_ bytes: [UInt8]) throws -> WavData {
+    guard bytes.count >= 44 else {
+      throw NSError(
+        domain: "VShadowPitch",
+        code: 1,
+        userInfo: [
+          NSLocalizedDescriptionKey: "The WAV file is too small."
+        ]
+      )
+    }
+
+    guard
+      String(bytes: bytes[0..<4], encoding: .ascii) == "RIFF",
+      String(bytes: bytes[8..<12], encoding: .ascii) == "WAVE"
+    else {
+      throw NSError(
+        domain: "VShadowPitch",
+        code: 2,
+        userInfo: [
+          NSLocalizedDescriptionKey: "The file is not a PCM WAV recording."
+        ]
+      )
+    }
+
+    var offset = 12
+    var audioFormat: Int?
+    var channels: Int?
+    var sampleRate: Double?
+    var blockAlign: Int?
+    var bitsPerSample: Int?
+    var dataOffset: Int?
+    var dataSize: Int?
+
+    while offset + 8 <= bytes.count {
+      let chunkId = String(
+        bytes: bytes[offset..<(offset + 4)],
+        encoding: .ascii
+      ) ?? ""
+      let chunkSize = Int(readUInt32(bytes, offset + 4))
+      let chunkDataStart = offset + 8
+
+      guard chunkSize <= bytes.count - chunkDataStart else {
+        throw NSError(
+          domain: "VShadowPitch",
+          code: 3,
+          userInfo: [
+            NSLocalizedDescriptionKey: "A WAV chunk exceeds the file size."
+          ]
+        )
+      }
+
+      if chunkId == "fmt " {
+        guard chunkSize >= 16 else {
+          throw NSError(
+            domain: "VShadowPitch",
+            code: 4,
+            userInfo: [
+              NSLocalizedDescriptionKey: "The WAV format chunk is invalid."
+            ]
+          )
+        }
+
+        audioFormat = Int(readUInt16(bytes, chunkDataStart))
+        channels = Int(readUInt16(bytes, chunkDataStart + 2))
+        sampleRate = Double(readUInt32(bytes, chunkDataStart + 4))
+        blockAlign = Int(readUInt16(bytes, chunkDataStart + 12))
+        bitsPerSample = Int(readUInt16(bytes, chunkDataStart + 14))
+      } else if chunkId == "data" {
+        dataOffset = chunkDataStart
+        dataSize = chunkSize
+        break
+      }
+
+      offset = chunkDataStart + chunkSize
+
+      if offset % 2 == 1 {
+        offset += 1
+      }
+    }
+
+    guard
+      audioFormat == 1,
+      let channels = channels,
+      channels > 0,
+      let sampleRate = sampleRate,
+      sampleRate >= 8_000,
+      let blockAlign = blockAlign,
+      blockAlign > 0,
+      let bitsPerSample = bitsPerSample,
+      [8, 16, 24, 32].contains(bitsPerSample),
+      let dataOffset = dataOffset,
+      let dataSize = dataSize,
+      dataSize > 0
+    else {
+      throw NSError(
+        domain: "VShadowPitch",
+        code: 5,
+        userInfo: [
+          NSLocalizedDescriptionKey:
+            "The recording is not a supported 8/16/24/32-bit PCM WAV file."
+        ]
+      )
+    }
+
+    let bytesPerSample = bitsPerSample / 8
+
+    guard blockAlign == channels * bytesPerSample else {
+      throw NSError(
+        domain: "VShadowPitch",
+        code: 6,
+        userInfo: [
+          NSLocalizedDescriptionKey: "The WAV block alignment is invalid."
+        ]
+      )
+    }
+
+    return WavData(
+      sampleRate: sampleRate,
+      channels: channels,
+      bitsPerSample: bitsPerSample,
+      blockAlign: blockAlign,
+      bytesPerSample: bytesPerSample,
+      dataOffset: dataOffset,
+      dataSize: dataSize
+    )
+  }
+
+  private static func readSample(
+    bytes: [UInt8],
+    offset: Int,
+    bitsPerSample: Int
+  ) -> Double {
+    switch bitsPerSample {
+    case 8:
+      return (Double(Int(bytes[offset]) - 128)) / 128.0
+    case 16:
+      let raw = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+      return Double(Int16(bitPattern: raw)) / 32_768.0
+    case 24:
+      var value =
+        Int(bytes[offset]) |
+        (Int(bytes[offset + 1]) << 8) |
+        (Int(bytes[offset + 2]) << 16)
+
+      if value & 0x0080_0000 != 0 {
+        value -= 0x0100_0000
+      }
+
+      return Double(value) / 8_388_608.0
+    case 32:
+      let raw =
+        UInt32(bytes[offset]) |
+        (UInt32(bytes[offset + 1]) << 8) |
+        (UInt32(bytes[offset + 2]) << 16) |
+        (UInt32(bytes[offset + 3]) << 24)
+      return Double(Int32(bitPattern: raw)) / 2_147_483_648.0
+    default:
+      return 0
+    }
+  }
+
+  private static func readUInt16(_ bytes: [UInt8], _ offset: Int) -> UInt16 {
+    return UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+  }
+
+  private static func readUInt32(_ bytes: [UInt8], _ offset: Int) -> UInt32 {
+    return UInt32(bytes[offset]) |
+      (UInt32(bytes[offset + 1]) << 8) |
+      (UInt32(bytes[offset + 2]) << 16) |
+      (UInt32(bytes[offset + 3]) << 24)
+  }
+}
+
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   override func application(
@@ -706,6 +1295,9 @@ final class PracticeRecordingBridge {
       messenger: engineBridge.applicationRegistrar.messenger()
     )
     PracticeRecordingBridge.shared.register(
+      messenger: engineBridge.applicationRegistrar.messenger()
+    )
+    PracticeAssessmentBridge.shared.register(
       messenger: engineBridge.applicationRegistrar.messenger()
     )
   }
